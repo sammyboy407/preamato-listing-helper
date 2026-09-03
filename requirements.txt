@@ -1,0 +1,5 @@
+openpyxl
+anthropic
+streamlit
+pandas
+python-calamine
