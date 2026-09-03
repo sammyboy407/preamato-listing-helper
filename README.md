@@ -36,12 +36,31 @@ Useful flags:
 - `--force-regenerate` — ignore the content cache and re-call the AI for every product
 - `--categories` — override the bundled eBay category file with a different one (see below)
 
-## eBay category list is built in
+## eBay category list (reference / lookup)
 
-`data/Ebay Category Codes.csv` is bundled with the project — eBay's category tree changes rarely,
-so there's no need to re-upload it each run. If eBay ever restructures categories, replace that
-file with an updated export (same column layout: L1..L6 + Category ID) and both the UI and CLI
-will pick it up automatically.
+The app's actual listing pipeline never needs the full eBay category tree — it only ever maps
+products into whichever categories are present in an uploaded eBay template, or the built-in
+catalog (see below), both of which come with real Required/Preferred/Optional field data.
+
+For a full reference list of every eBay category ID (e.g. to look one up by hand), generate
+`data/Ebay Category Codes.csv` yourself with:
+
+```bash
+export EBAY_APP_ID=your-app-id      # free developer.ebay.com account
+export EBAY_CERT_ID=your-cert-id    # -> My Account -> Application Keys -> Production keyset
+python3 scripts/fetch_ebay_category_tree.py
+```
+
+This pulls the real, current, complete tree straight from eBay's own Taxonomy API (read-only,
+no seller login needed) — there's no trustworthy static download of the full list anymore, so
+this is the only reliable source. Re-run it occasionally to refresh, since eBay's tree does
+change over time. Once generated, look things up with:
+
+```bash
+python3 -m src.category_codes "leather handbag"
+python3 -m src.category_codes "trainers" --l1 "Clothes, Shoes & Accessories"
+python3 -m src.category_codes "x" --list-l1   # list all top-level departments
+```
 
 ## How it works
 

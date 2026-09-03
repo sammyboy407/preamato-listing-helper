@@ -2,6 +2,17 @@
 into a flat list of leaf categories with full breadcrumb paths, searchable by
 keyword so we can hand the AI a short candidate shortlist instead of the
 whole ~16k-row tree.
+
+The CSV itself (data/Ebay Category Codes.csv) is NOT bundled in this repo —
+there's no trustworthy static download of eBay's full category list anymore.
+Generate it yourself with `python3 scripts/fetch_ebay_category_tree.py`,
+which pulls the real, current, complete tree straight from eBay's own
+Taxonomy API (needs a free developer.ebay.com App ID/Cert ID — see that
+script's docstring). Run this module directly for a quick keyword lookup
+once you have the file:
+
+    python3 -m src.category_codes "leather handbag"
+    python3 -m src.category_codes "trainers" --l1 "Clothes, Shoes & Accessories"
 """
 from __future__ import annotations
 
@@ -11,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 LEVELS = ["L1", "L2", "L3", "L4", "L5", "L6"]
+DEFAULT_PATH = Path(__file__).resolve().parent.parent / "data" / "Ebay Category Codes.csv"
 
 
 @dataclass
@@ -107,3 +119,40 @@ def search(categories: list[Category], query_terms: list[str], top_n: int = 25) 
             scored.append((score, cat))
     scored.sort(key=lambda x: (-x[0], len(x[1].path)))
     return [c for _, c in scored[:top_n]]
+
+
+def _main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Quick keyword lookup against eBay's full category tree.")
+    parser.add_argument("query", help="e.g. 'leather handbag', 'mens trainers'")
+    parser.add_argument("--path", default=str(DEFAULT_PATH), help="Path to the category CSV (default: data/Ebay Category Codes.csv)")
+    parser.add_argument("--l1", default=None, help="Restrict to one top-level department (see --list-l1)")
+    parser.add_argument("--list-l1", action="store_true", help="List all top-level department names and exit")
+    parser.add_argument("-n", "--top-n", type=int, default=25)
+    args = parser.parse_args()
+
+    csv_path = Path(args.path)
+    if not csv_path.exists():
+        raise SystemExit(
+            f"{csv_path} doesn't exist yet. Generate it with:\n"
+            f"  python3 scripts/fetch_ebay_category_tree.py"
+        )
+    categories = load_categories(csv_path)
+
+    if args.list_l1:
+        for name in top_level_categories(categories):
+            print(name)
+        return
+
+    pool = filter_by_l1(categories, args.l1) if args.l1 else categories
+    results = search(pool, [args.query], top_n=args.top_n)
+    if not results:
+        print("No matches.")
+        return
+    for c in results:
+        print(f"{c.category_id}\t{c.full_path}")
+
+
+if __name__ == "__main__":
+    _main()
