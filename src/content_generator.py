@@ -55,7 +55,62 @@ from .data_loader import Product, split_image_urls
 
 _CACHE_LOCK = threading.Lock()
 
+# The content cache is keyed partly on a fingerprint of the code that
+# actually decides an item's size, so that changing any of it automatically
+# invalidates every cached result rather than relying on someone remembering
+# to bump a version constant. That matters because a stale cache entry is
+# indistinguishable from a fresh one in the output file: after the 04.09.26
+# fix, a re-run would otherwise have quietly re-served the EU 45 -> UK 4.5
+# results it had already stored.
+#
+# CACHE_VERSION is still here for changes the fingerprint can't see (a
+# different prompt, a new deterministic field), and is mixed in alongside it.
+CACHE_VERSION = "v3"
+
+
+def _sizing_fingerprint() -> str:
+    """A short hash of every function and table that determines the size
+    written to a listing. Any edit to them changes the hash, which changes
+    every cache key, which forces a regeneration."""
+    import hashlib
+    import inspect
+
+    parts = []
+    for fn in (_resolve_size, _is_size_aspect,
+               aspect_matching.enforce_title_size,
+               aspect_matching.match_shoe_size_uk, aspect_matching.match_size,
+               aspect_matching.size_display, aspect_matching.fuzzy_match,
+               aspect_matching.parse_shoe_size, aspect_matching._eu_to_uk_table):
+        try:
+            parts.append(inspect.getsource(fn))
+        except (OSError, TypeError):  # pragma: no cover - source always available in practice
+            parts.append(repr(fn))
+    parts.append(repr(sorted(aspect_matching.EU_TO_UK_MENS_SHOE_SIZE.items())))
+    parts.append(repr(sorted(aspect_matching.EU_TO_UK_WOMENS_SHOE_SIZE.items())))
+    parts.append(repr(sorted(aspect_matching.SIZE_ALIASES.items())))
+    return hashlib.sha256("".join(parts).encode()).hexdigest()[:12]
+
+
 LARGE_LIST_THRESHOLD = 40
+
+# Aspects that are never filled, whatever eBay says about them. Each one is
+# either meaningless for this stock or unknowable from the data, and every
+# one of them showed up as a confident-looking wrong value on the 04.09.26
+# batch ("Character: Aladdin", "Performance/Activity: American Football",
+# "Theme: 20s", "Unit Type: 10ml", "Warmth Weight: 400") because the AI was
+# being forced to pick something. The account's own Optiseller-era history
+# left these blank or "Not Applicable" throughout. A blank Optional/
+# Preferred field costs nothing; a wrong one misleads buyers and search.
+NEVER_FILL_ASPECTS = {
+    "C:Character", "C:Character Family", "C:Theme", "C:Performance/Activity",
+    "C:Unit Type", "C:Unit Quantity", "C:Number in Pack", "C:Custom Bundle",
+    "C:Bundle Description", "C:Set Includes", "C:Model", "C:Product Line",
+    "C:Personalisation Instructions", "C:California Prop 65 Warning",
+    "C:Year Manufactured", "C:Release Year", "C:Reference Number", "C:Signed",
+    "C:Seller Warranty", "C:Warmth Weight", "C:Fabric Weight", "C:Compatible Model",
+    "C:Required Tools", "C:Mounting", "C:Labels & Certifications", "C:Certification",
+    "C:Cleat Type", "C:Heel to Toe Drop", "C:Pronation",
+}
 
 # Aspects resolved deterministically in Python — never asked of the AI.
 DETERMINISTIC_ASPECTS = {"C:Brand", "C:Department", "C:Country of Origin", "C:MPN", "C:Type"}
@@ -85,6 +140,42 @@ MEASUREMENT_ASPECTS = {
 # used automatically as well — this set only fills the gap for .xlsx-sourced
 # templates, which have no column that says whether a field is multi-select.
 MULTI_SELECT_ASPECTS = {"C:Occasion"}
+
+
+# What goes in a field we deliberately aren't filling. Sammy's rule,
+# 04.09.26: "dont fill with random info just say not specified" — an
+# explicit placeholder rather than a blank, matching how the account's own
+# Optiseller-era listings handled these (Character: "Not Applicable" on 161
+# listings, Chest Size / Waist Size: "Not Specified", etc.).
+#
+# Only ever written where eBay definitely accepts a value that isn't on the
+# aspect's own list (see ebay_template.AspectSpec.free_text): for a
+# SELECTION_ONLY aspect, "Not Specified" is an invalid value and would get
+# the whole listing rejected — the same class of failure as a missing
+# required field, which is exactly what this pipeline exists to avoid. A
+# blank and a "Not Specified" mean the same thing to eBay's search anyway,
+# so the placeholder is presentation, never worth risking a rejection for.
+PLACEHOLDER_VALUE = "Not Specified"
+
+
+def _placeholder_for(spec: ebay_template.AspectSpec) -> str | None:
+    """The value to write into an aspect we're deliberately not filling, or
+    None to leave it blank because eBay wouldn't accept a placeholder."""
+    if spec.values:
+        for candidate in (PLACEHOLDER_VALUE, "Not Applicable", "Unspecified", "Does Not Apply"):
+            if candidate in spec.values:
+                return candidate
+    return PLACEHOLDER_VALUE if spec.free_text else None
+
+
+def _set_placeholder(specifics: dict, name: str, spec: ebay_template.AspectSpec) -> None:
+    """Marks an aspect as deliberately not filled. Writes the placeholder
+    where eBay accepts one, otherwise clears the field."""
+    placeholder = _placeholder_for(spec)
+    if placeholder:
+        specifics[name] = placeholder
+    else:
+        specifics.pop(name, None)
 
 
 def _is_multi_select(name: str, spec: ebay_template.AspectSpec) -> bool:
@@ -125,6 +216,12 @@ def _resolve_deterministic(name: str, product: Product, spec: ebay_template.Aspe
         # Colour/Material/Brand/Gender, entered at intake and carried onto
         # the Measurements file at photography — Master is the source).
         raw = m.get("SubCat2")
+        if spec.values and len(spec.values) == 1:
+            # eBay only allows one Type in this category (e.g. Jumpers &
+            # Cardigans -> "Jumper", Boots -> "Boot"), so that IS the
+            # answer — matching SubCat2 ("Knitwear") against it just fails
+            # and left Type blank on the 04.09.26 batch.
+            return spec.values[0]
         if not raw:
             return None
         if spec.values:
@@ -156,13 +253,22 @@ def _resolve_size(name: str, product: Product, spec: ebay_template.AspectSpec) -
     raw = meas.get("Size")
     if name == "C:UK Shoe Size":
         # Measurements file's raw shoe "Size" is in EU sizing, not UK — see
-        # aspect_matching.EU_TO_UK_WOMENS_SHOE_SIZE / _MENS_SHOE_SIZE. No raw
-        # pass-through here (unlike C:Size below): the raw number is on a
-        # different scale, so writing it into a UK field unconverted would
-        # be a wrong size, not a differently-formatted right one.
+        # aspect_matching.match_shoe_size_uk / parse_shoe_size. Converted
+        # via the gender-appropriate table, never matched directly against
+        # the UK list and never passed through raw: the raw number is on a
+        # different scale, so an unconverted value in a UK field is a wrong
+        # size, not a differently-formatted right one.
         return aspect_matching.match_shoe_size_uk(raw, spec.values, m.get("Gender"))
     if name == "C:EU Shoe Size":
-        return aspect_matching.match_size(raw, spec.values)
+        return aspect_matching.match_shoe_size_eu(raw, spec.values)
+    if name in ("C:US Shoe Size", "C:AU Shoe Size"):
+        # Deliberately left blank (both are Preferred, never Required).
+        # 04.09.26: these were being filled by the same broken direct match
+        # that put "4.5" in the UK field. The account's history does fill
+        # them (US = UK+2 women / UK+0.5 men, AU = US women / UK men) but
+        # that's a convention to confirm with Sammy before automating —
+        # a blank is harmless, a wrong size is not.
+        return None
     matched = aspect_matching.match_size(raw, spec.values)
     if matched or name != "C:Size":
         # Other size-family aspects (Waist Size, Chest Size, Ring Size, Cup
@@ -210,11 +316,20 @@ def classify_aspects(
     for name, spec in aspects.items():
         if name in DETERMINISTIC_ASPECTS or name in MEASUREMENT_ASPECTS or _is_size_aspect(name):
             continue
+        if name in NEVER_FILL_ASPECTS:
+            skipped[name] = spec
+            continue
         if spec.values is None:
             skipped[name] = spec  # free text, not inferable — left blank
             continue
         if _is_multi_select(name, spec):
-            multi_specs[name] = spec
+            # Same large-list rule as single-value aspects: a non-Required
+            # multi-select with a huge list (Character: 271 values, Theme:
+            # 133...) isn't worth a prompt full of options and a guess.
+            if len(spec.values) > LARGE_LIST_THRESHOLD and spec.level != "REQUIRED" and name not in MULTI_SELECT_ASPECTS:
+                skipped[name] = spec
+            else:
+                multi_specs[name] = spec
             continue
         if _is_colour_aspect(name):
             hybrid_specs[name] = spec
@@ -242,7 +357,7 @@ def _condition_rubric(category: ebay_template.CategorySpec) -> str:
     )
 
 
-def _product_brief(product: Product) -> str:
+def _product_brief(product: Product, size_for_title: str | None = None) -> str:
     m, meas = product.master, product.measurements
     lines = [
         f"SKU: {product.sku}",
@@ -260,9 +375,16 @@ def _product_brief(product: Product) -> str:
         # physical item at that stage, not just carried over.
         f"Colour (raw, may not match eBay's exact wording): "
         f"{m.get('Colour') or meas.get('Colour') or '(not recorded)'}",
-        f"Size (raw, from the verified Pictures & Measurements file — "
-        f"'(not measured)' means treat size as unknown, do not guess one "
-        f"from the title or elsewhere): {meas.get('Size') or '(not measured)'}",
+        # The size the listing will actually carry, already resolved and
+        # converted in Python (see generate_for_product). The AI must use
+        # this string as-is in the title — on 04.09.26 it was converting
+        # the raw EU shoe size to UK itself, so the title and the item
+        # specific could disagree. If nothing was resolved, size stays out
+        # of the title rather than being guessed from anywhere else.
+        f"Size — use EXACTLY this in the title, do not convert or reformat it: "
+        f"{size_for_title or '(no size — leave size out of the title)'}",
+        f"Raw size as recorded in the Measurements file, for context only: "
+        f"{meas.get('Size') or '(not measured)'}",
         f"Composition/Material (raw, may be messy): "
         f"{m.get('Composition') or meas.get('Material') or '(not recorded)'}",
         f"Country of Origin (raw): {m.get('Country of Origin')}",
@@ -310,24 +432,50 @@ def _build_schema_and_system(
     item_specific_required = []
     field_notes = []
 
+    # Values that appear word-for-word in the product's own text are a far
+    # stronger signal than an inference: a "FRILLY TIERED MINI SKIRT" is
+    # Style "Mini", not "Tulip" (04.09.26). Surfaced per field as a hint.
+    text_tokens = set(re.findall(r"[a-z0-9]+", product_text.lower()))
+
+    def _literal_hits(values: list[str]) -> list[str]:
+        hits = []
+        for v in values:
+            vt = re.findall(r"[a-z0-9]+", v.lower())
+            if vt and all(t in text_tokens for t in vt):
+                hits.append(v)
+        return hits
+
     for name, spec in enum_specs.items():
         item_specific_props[name] = {"type": "string", "enum": spec.values}
-        item_specific_required.append(name)
-        field_notes.append(f"  {name} ({spec.level}): choose exactly one from its enum list")
+        hits = _literal_hits(spec.values)
+        hint = f" These values appear literally in the item's own data, so prefer one of them unless it's clearly wrong: {', '.join(hits)}." if hits else ""
+        if spec.level == "REQUIRED":
+            item_specific_required.append(name)
+            field_notes.append(f"  {name} (REQUIRED): choose exactly one from its enum list.{hint}")
+        else:
+            field_notes.append(
+                f"  {name} ({spec.level}, optional): choose one from its enum list ONLY if the "
+                f"product data clearly supports it; otherwise leave this field out entirely. A "
+                f"blank is fine, a guess is not.{hint}"
+            )
 
     for name, spec in multi_specs.items():
+        required = spec.level == "REQUIRED"
         item_specific_props[name] = {
             "type": "array",
             "items": {"type": "string", "enum": spec.values},
-            "minItems": 1,
+            "minItems": 1 if required else 0,
         }
-        item_specific_required.append(name)
+        if required:
+            item_specific_required.append(name)
         field_notes.append(
             f"  {name} ({spec.level}): eBay allows MULTIPLE values here — return every one "
             f"from its enum list that genuinely fits this item, not just the single best match. "
             f"Buyers filter listings by this field, so under-selecting loses search visibility, "
             f"but only include values that are actually true of the item — don't pad the list "
-            f"with ones that don't apply. Full list: {', '.join(spec.values)}"
+            f"with ones that don't apply"
+            + ("." if required else ", and return an empty list if none genuinely apply.")
+            + f" Full list: {', '.join(spec.values)}"
         )
 
     for name, spec in hybrid_specs.items():
@@ -375,11 +523,12 @@ def _build_schema_and_system(
 for a product in the eBay category "{category.category_name}" (ID {category.category_id}).
 
 1. Write an SEO-optimised eBay Title: max 80 characters, front-load Brand + item
-   type + the most distinctive attribute (colour/print/material), include Size
-   and "RRP {{amount}}" (no currency symbol, just the number) near the end if
-   space allows, in the terse keyword-dense style eBay buyers search with (not
-   a grammatical sentence). Do not exceed 80
-   characters under any circumstance.
+   type + the most distinctive attribute (colour/print/material), include the
+   Size string given in the product data EXACTLY as written (never convert it
+   to another sizing system or invent a UK/EU/US equivalent) and "RRP {{amount}}"
+   (no currency symbol, just the number) near the end if space allows, in the
+   terse keyword-dense style eBay buyers search with (not a grammatical
+   sentence). Do not exceed 80 characters under any circumstance.
 2. {_condition_rubric(category)}
 3. Write a short ConditionDescription (buyer-facing, plain language version of
    any condition notes given; if none given and condition is New, say so briefly).
@@ -415,7 +564,7 @@ def generate_for_product(
     cache_dir: str | Path,
     force: bool = False,
 ) -> dict:
-    cache_key = f"{product.sku}::{category.category_id}"
+    cache_key = f"{CACHE_VERSION}-{_sizing_fingerprint()}::{product.sku}::{category.category_id}"
 
     if not force:
         with _CACHE_LOCK:
@@ -423,8 +572,38 @@ def generate_for_product(
             if cache_key in cache:
                 return cache[cache_key]
 
-    enum_specs, hybrid_specs, multi_specs, _skipped = classify_aspects(category.category_id, template)
-    product_text = _product_brief(product)
+    # 1. Everything that can be resolved without the AI is resolved FIRST —
+    #    brand, department, type, measurements and, critically, size — so
+    #    the AI is handed the exact size string the listing will carry and
+    #    can't disagree with it (04.09.26: the title said "UK 11" from the
+    #    AI's own EU->UK conversion while the item specific said 4.5).
+    aspects = template.aspects.get(str(category.category_id), {})
+    resolved: dict[str, str] = {}
+    for name, spec in aspects.items():
+        if name in DETERMINISTIC_ASPECTS:
+            value = _resolve_deterministic(name, product, spec)
+        elif name in MEASUREMENT_ASPECTS:
+            value = _resolve_measurement(name, product)
+        elif _is_size_aspect(name):
+            value = _resolve_size(name, product, spec)
+            if not value and spec.level == "REQUIRED":
+                raise ValueError(f"required field {name!r}: {_size_failure_detail(name, product, spec)}")
+        else:
+            continue
+        if value:
+            resolved[name] = value
+
+    raw_size = product.measurements.get("Size")
+    size_for_title = aspect_matching.size_display(
+        raw_size,
+        uk_shoe=resolved.get("C:UK Shoe Size"),
+        eu_shoe=resolved.get("C:EU Shoe Size"),
+        clothing_size=resolved.get("C:Size"),
+    )
+
+    # 2. The AI call, for the fields that genuinely need judgment.
+    enum_specs, hybrid_specs, multi_specs, skipped = classify_aspects(category.category_id, template)
+    product_text = _product_brief(product, size_for_title)
     schema, system = _build_schema_and_system(category, enum_specs, hybrid_specs, multi_specs, product_text)
 
     result = ai_client.call_structured(
@@ -449,18 +628,38 @@ def generate_for_product(
             title = f"{brand_raw.upper()} {title}".strip()
         result["title"] = title
 
+    # The title's size must be the SAME size as the item specifics — Sammy,
+    # 04.09.26: "it cant show UK7 in the title and then 7.5 in the item
+    # specifics - too many customer questions." The prompt hands the AI the
+    # exact resolved string and tells it not to convert, but a prompt is not
+    # a guarantee (the 04.09.26 batch had a title reading "UK 11" while
+    # C:UK Shoe Size said 4.5), so it's enforced in Python here, same as the
+    # brand casing above.
+    result["title"] = aspect_matching.enforce_title_size(result.get("title", ""), size_for_title)
+
     if len(result.get("title", "")) > 80:
         result["title"] = result["title"][:80].rstrip()
 
-    specifics = result.get("item_specifics", {})
+    specifics = result.get("item_specifics", {}) or {}
 
-    # The API does not hard-enforce JSON-schema `enum` server-side — it's
-    # guidance, not a guarantee. Validate every enum field and coerce any
-    # value that isn't literally one of the allowed options.
+    # 3. Validate what the AI returned. The API does not hard-enforce
+    #    JSON-schema `enum` server-side — it's guidance, not a guarantee —
+    #    so every value is checked against the real list. The rule
+    #    throughout: a Required field always ends up with a valid value; a
+    #    non-Required field is dropped rather than filled with a fallback.
+    #    (04.09.26: the old "or spec.values[0]" fallbacks are what produced
+    #    "Character: Aladdin" and "Performance/Activity: American Football".)
     for name, spec in enum_specs.items():
         value = specifics.get(name)
-        if value not in (spec.values or []):
+        if value in (spec.values or []):
+            continue
+        matched = aspect_matching.fuzzy_match(value, spec.values, cutoff=0.5) if value else None
+        if matched:
+            specifics[name] = matched
+        elif spec.level == "REQUIRED":
             specifics[name] = aspect_matching.fuzzy_match(value, spec.values, cutoff=0.3) or spec.values[0]
+        else:
+            _set_placeholder(specifics, name, spec)
 
     # Fuzzy-validate the hybrid (large-list) fields against the real values —
     # the AI's free-text guess must still resolve to something eBay accepts.
@@ -480,14 +679,11 @@ def generate_for_product(
         # else: leave the AI's free-text guess as-is (best effort; not in the
         # sampled list shown to it doesn't necessarily mean it's wrong).
 
-    # Validate the multi-select fields (e.g. Occasion) — the AI returns a
-    # JSON array; keep only values that are literally in the real closed
-    # list (fuzzy-matching each one, same tolerance as a single enum field),
-    # then join with "|" since that's eBay's bulk-CSV convention for a
-    # multi-value aspect cell. Guarantee at least one value survives (a
-    # multi-select Required/Optional field with zero values is the same
-    # "blank Required field" risk as the shoe-size bug) by falling back to
-    # the closest single match if every guess failed to match anything.
+    # Multi-select fields (e.g. Occasion): the AI returns a JSON array; keep
+    # only values that are literally in the real closed list, joined with
+    # "|" (eBay's bulk-CSV convention for a multi-value cell). A Required
+    # multi-select that ends up empty falls back to the closest single
+    # match; a non-Required one is simply left blank.
     for name, spec in multi_specs.items():
         guesses = specifics.get(name)
         if not isinstance(guesses, list):
@@ -497,72 +693,61 @@ def generate_for_product(
             m2 = aspect_matching.fuzzy_match(guess, spec.values, cutoff=0.5)
             if m2 and m2 not in matched:
                 matched.append(m2)
-        if not matched:
-            matched = [spec.values[0]]
-        specifics[name] = "|".join(matched)
+        if matched:
+            specifics[name] = "|".join(matched)
+        elif spec.level == "REQUIRED":
+            specifics[name] = spec.values[0]
+        else:
+            _set_placeholder(specifics, name, spec)
 
-    # Layer in the deterministic fields.
-    aspects = template.aspects.get(str(category.category_id), {})
-    for name, spec in aspects.items():
-        if name in DETERMINISTIC_ASPECTS:
-            value = _resolve_deterministic(name, product, spec)
-            if value:
-                specifics[name] = value
-        elif name in MEASUREMENT_ASPECTS:
+    # Anything the AI returned for a field it wasn't asked about (or one on
+    # the never-fill list) is discarded — only vetted fields reach the file.
+    allowed = set(enum_specs) | set(hybrid_specs) | set(multi_specs)
+    for name in list(specifics):
+        if name not in allowed:
+            specifics.pop(name, None)
+
+    # Every aspect deliberately left to the placeholder rule — never-fill
+    # fields, free-text fields nothing can infer, and large non-required
+    # lists — gets "Not Specified" rather than a blank cell, wherever eBay
+    # accepts a value that isn't on the aspect's own list.
+    for name, spec in skipped.items():
+        _set_placeholder(specifics, name, spec)
+
+    # 4. Layer in the deterministic/size fields from step 1 — these always
+    #    win over anything the AI said.
+    specifics.update(resolved)
+
+    # Size Type defaults to "Regular" when the AI didn't commit to one and
+    # the category offers it: it's the fit category (Regular/Petite/Tall/
+    # Plus), the stock is standard designer sizing, and the account's own
+    # history filled it as Regular on 647 of 648 listings that had it.
+    size_type_spec = aspects.get("C:Size Type")
+    if size_type_spec and not specifics.get("C:Size Type") and size_type_spec.values and "Regular" in size_type_spec.values:
+        specifics["C:Size Type"] = "Regular"
+
+    # Measurements are always written as item specifics, whether or not this
+    # category's eBay aspect list happens to define them — Sammy's request,
+    # 04.09.26: "keep the size we put into the orbitvu csv in the title,
+    # along with the measurements in custom specifics and descriptions for
+    # buyers to understand." That matters most exactly where eBay defines no
+    # measurement aspect at all, which is every clothing category checked
+    # (Skirts, Jumpers, Coats, Dresses): eBay's bulk format turns any
+    # unrecognised "C:<name>" column into a custom, buyer-visible item
+    # specific, and the account's own Optiseller-era uploads shipped these
+    # five columns exactly this way and were accepted. Without this, a
+    # department-template run put the measurements in the description only.
+    for name in MEASUREMENT_ASPECTS:
+        if not specifics.get(name):
             value = _resolve_measurement(name, product)
             if value:
                 specifics[name] = value
-        elif _is_size_aspect(name):
-            value = _resolve_size(name, product, spec)
-            if value:
-                specifics[name] = value
-            elif spec.level == "REQUIRED":
-                # Never ship a listing with a guessed or missing size for a
-                # Required size field — that's exactly the wrong-size-
-                # shipped/customer-service/negative-feedback risk the
-                # Measurements step exists to prevent. Raising here means
-                # pipeline.py's existing per-product error handling skips
-                # this SKU (with the SKU named in the run's error summary)
-                # instead of silently producing an incomplete or blank
-                # listing.
-                #
-                # Two genuinely different causes end up here, and 04.09.26
-                # showed the old message conflated them into one misleading
-                # "no size in the file" line even when a size WAS present.
-                # Since C:Size now passes an unmatched raw value straight
-                # through (see _resolve_size), the "present but unusable"
-                # case is only reachable for a shoe-size field: a raw EU
-                # number the EU->UK conversion tables don't cover, or a
-                # non-numeric value. Naming the raw value found, plus a
-                # sample of what eBay expects, makes each case self-
-                # diagnosing without digging through the code.
-                raw_size = product.measurements.get("Size")
-                sample_values = ", ".join(spec.values[:12]) if spec.values else "(no closed list)"
-                more = f", +{len(spec.values) - 12} more" if spec.values and len(spec.values) > 12 else ""
-                if raw_size:
-                    detail = (
-                        f"the Measurements file has a size for this SKU ({raw_size!r}), but it "
-                        f"couldn't be converted to a value eBay accepts for this category's "
-                        f"{name!r} field: {sample_values}{more}. For shoes the raw size is "
-                        f"treated as EU sizing and converted via the EU->UK tables in "
-                        f"aspect_matching.py — check the value really is an EU size, or extend "
-                        f"those tables if it's outside their range."
-                    )
-                else:
-                    detail = (
-                        "no size in the Pictures & Measurements file for this SKU — Master File "
-                        "size is never used as a fallback (it isn't verified against the physical "
-                        "item). Add this SKU's size to the Measurements file and re-run."
-                    )
-                raise ValueError(
-                    f"required field {name!r}: {detail}"
-                )
 
     # Country of Origin is always appended to the output header (see
     # build.EXTRA_COLUMNS) regardless of whether this category's own eBay
     # Aspects happen to define it — Sammy asked (04.09.26) for it to always
     # be filled in, not just present as an empty column. The deterministic
-    # loop above already resolves it whenever the category's Aspects define
+    # step above already resolves it whenever the category's Aspects define
     # it with a usable closed list to fuzzy-match against; this is the
     # backstop for every other case (no Country of Origin aspect for this
     # category at all, or its closed list is empty/too sparse to match).
@@ -579,3 +764,56 @@ def generate_for_product(
         cache[cache_key] = result
         _save_cache(cache_dir, cache)
     return result
+
+
+def _size_failure_detail(name: str, product: Product, spec: ebay_template.AspectSpec) -> str:
+    """Plain-language reason a Required size field couldn't be filled, so
+    the SKU is skipped with something actionable in the run summary rather
+    than a blank or guessed size (the wrong-size-shipped / customer-service
+    / negative-feedback risk the Measurements step exists to prevent)."""
+    raw_size = product.measurements.get("Size")
+    if not raw_size:
+        return (
+            "no size in the Pictures & Measurements file for this SKU — Master File "
+            "size is never used as a fallback (it isn't verified against the physical "
+            "item). Add this SKU's size to the Measurements file and re-run."
+        )
+    if "Shoe Size" in name:
+        system, number = aspect_matching.parse_shoe_size(raw_size)
+        gender = str(product.master.get("Gender") or "").strip().upper()
+        if system is None and number is not None:
+            return (
+                f"the Measurements file size {raw_size!r} is a bare number too small to be "
+                f"an EU shoe size, so it could be UK or US — record it as 'EU 38' / 'UK 5' "
+                f"style in the Measurements file so there's no ambiguity, and re-run."
+            )
+        if system == "EU":
+            if gender not in ("MEN", "WOMEN"):
+                return (
+                    f"the Measurements file has an EU size ({raw_size!r}) but the Master File "
+                    f"Gender is {gender or '(blank)'!r}, and EU->UK differs by gender (EU 43 is "
+                    f"UK 9 for men, UK 10 for women) — so converting it would be a guess. Either "
+                    f"set Gender to MEN or WOMEN, or record the UK size directly (e.g. 'UK 9') "
+                    f"in the Measurements file."
+                )
+            return (
+                f"the Measurements file size {raw_size!r} is an EU size outside the "
+                f"{'men' if gender == 'MEN' else 'women'}'s EU->UK conversion table in "
+                f"aspect_matching.py — check the value, or extend the table if it's a real size."
+            )
+        if system == "US":
+            return (
+                f"the Measurements file size {raw_size!r} is a US size — only UK or EU "
+                f"sizes are converted. Record the EU or UK size in the Measurements file and re-run."
+            )
+        return (
+            f"the Measurements file size {raw_size!r} isn't a recognisable shoe size "
+            f"(expected e.g. '45', 'EU 45' or 'UK 11')."
+        )
+    sample_values = ", ".join(spec.values[:12]) if spec.values else "(no closed list)"
+    more = f", +{len(spec.values) - 12} more" if spec.values and len(spec.values) > 12 else ""
+    return (
+        f"the Measurements file has a size for this SKU ({raw_size!r}), but it "
+        f"couldn't be matched to a value eBay accepts for this category's {name!r} "
+        f"field: {sample_values}{more}."
+    )

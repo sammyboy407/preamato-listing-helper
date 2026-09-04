@@ -35,7 +35,7 @@ from pathlib import Path
 # before this was added.
 EXTRA_COLUMNS = ["OriginalRetailPrice", "ConditionDescription", "C:Country of Origin"]
 
-from . import config, ebay_template
+from . import aspect_matching, config, ebay_template
 from .data_loader import Product, split_image_urls
 
 GENDER_POSSESSIVE_MAP = {"WOMEN": "Women's", "MEN": "Men's", "UNISEX": "Unisex"}
@@ -91,8 +91,18 @@ def build_description(
     # Never fall back to the Master File's Size here either — see
     # content_generator._resolve_size for why (unverified against the
     # physical item; a real wrong-size/CS-issue risk if it leaked into the
-    # customer-facing description).
-    size = specifics.get("C:Size") or specifics.get("C:UK Shoe Size") or meas.get("Size") or ""
+    # customer-facing description). Built from the resolved item specifics
+    # by the same helper the title uses (aspect_matching.size_display), so
+    # title, description and C: columns can never disagree. both=True adds
+    # the converted size in brackets ("EU 45 (UK 11)") — the description is
+    # where there's room to spell it out, while the title stays as recorded.
+    size = aspect_matching.size_display(
+        meas.get("Size"),
+        uk_shoe=specifics.get("C:UK Shoe Size"),
+        eu_shoe=specifics.get("C:EU Shoe Size"),
+        clothing_size=specifics.get("C:Size") or meas.get("Size"),
+        both=True,
+    ) or ""
 
     # Physical measurements (inches) — verified Pictures & Measurements file
     # only, same as Size above (see content_generator.MEASUREMENT_ASPECTS).

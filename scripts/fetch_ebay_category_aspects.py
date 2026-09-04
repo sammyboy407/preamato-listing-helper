@@ -190,9 +190,19 @@ def _parse_aspects_response(raw: dict, category_id: str) -> dict:
         usage = str(constraint.get("aspectUsage") or "").upper()
         level = "REQUIRED" if required else ("PREFERRED" if usage == "RECOMMENDED" else "OPTIONAL")
         cardinality = str(constraint.get("itemToAspectCardinality") or "SINGLE").upper()
+        # FREE_TEXT vs SELECTION_ONLY. Matters because aspectValues is only a
+        # list of *suggestions* for a FREE_TEXT aspect (Brand on Women's
+        # Dresses is FREE_TEXT with thousands of suggested values — confirmed
+        # against a real --dump-raw response 04.09.26), but a hard closed
+        # list for SELECTION_ONLY. Without it there's no safe way to know
+        # whether a value that isn't on the list — a raw size, or a "Not
+        # Specified" placeholder — will be accepted or will get the listing
+        # rejected. Older template files predate this key; see
+        # ebay_template.AspectSpec.mode for how that's handled.
+        mode = str(constraint.get("aspectMode") or "").upper() or None
         values_raw = a.get("aspectValues") or []
         values = [v.get("localizedValue") for v in values_raw if v.get("localizedValue")] or None
-        out[f"C:{name}"] = {"level": level, "multi": cardinality == "MULTI", "values": values}
+        out[f"C:{name}"] = {"level": level, "multi": cardinality == "MULTI", "mode": mode, "values": values}
     return out
 
 

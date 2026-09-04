@@ -48,6 +48,21 @@ class AspectSpec:
     # that module's docstring). Defaults to False so existing .xlsx-sourced
     # templates behave exactly as before.
     multi: bool = False
+    # eBay's own aspectMode: "FREE_TEXT" (values is a list of suggestions —
+    # any other value is accepted too) or "SELECTION_ONLY" (values is a hard
+    # closed list — anything else gets the listing rejected). None means
+    # unknown: either an .xlsx-sourced template, or a JSON template
+    # generated before scripts/fetch_ebay_category_aspects.py started
+    # capturing this. Unknown is treated as strict everywhere it's used, so
+    # a missing answer can never cause a rejected listing.
+    mode: str | None = None
+
+    @property
+    def free_text(self) -> bool:
+        """True only when eBay definitely accepts a value that isn't on this
+        aspect's list. An aspect with no list at all is free text by
+        definition; otherwise it takes an explicit FREE_TEXT from eBay."""
+        return self.values is None or self.mode == "FREE_TEXT"
 
 
 @dataclass
@@ -164,6 +179,7 @@ def load_json_template(path: str | Path) -> EbayTemplate:
                 level=spec.get("level", "OPTIONAL"),
                 values=spec.get("values"),
                 multi=bool(spec.get("multi", False)),
+                mode=spec.get("mode"),
             )
             for name, spec in cat_aspects.items()
         }
