@@ -125,6 +125,21 @@ api_key = st.text_input(
     help="Get one at console.anthropic.com. Used only for this session — never saved to disk.",
     label_visibility="collapsed",
 )
+with st.expander("Workspace ID (only needed for some keys)"):
+    st.caption(
+        "Most keys don't need this — leave it blank. It's only required if your API key is "
+        "\"identity-linked\" (a Personal or Service Account key) AND set to work across "
+        "multiple workspaces rather than restricted to just one. If you see an error mentioning "
+        "\"anthropic-workspace-id is required\", either paste that workspace's ID here (from "
+        "console.anthropic.com > Settings > Workspaces), or simpler: go create a new key there "
+        "restricted to a single workspace instead, which needs no ID at all."
+    )
+    workspace_id = st.text_input(
+        "Workspace ID",
+        value=os.environ.get("ANTHROPIC_WORKSPACE_ID", ""),
+        placeholder="wrkspc_...",
+        label_visibility="collapsed",
+    )
 
 st.subheader("2. Upload your files")
 col1, col2 = st.columns(2)
@@ -242,6 +257,10 @@ if run_clicked:
             st.error(p)
     else:
         os.environ["ANTHROPIC_API_KEY"] = api_key
+        if workspace_id.strip():
+            os.environ["ANTHROPIC_WORKSPACE_ID"] = workspace_id.strip()
+        else:
+            os.environ.pop("ANTHROPIC_WORKSPACE_ID", None)
 
         tmp_dir = Path(tempfile.mkdtemp(prefix="plh_"))
 

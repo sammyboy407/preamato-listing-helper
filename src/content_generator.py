@@ -91,8 +91,19 @@ def _is_multi_select(name: str, spec: ebay_template.AspectSpec) -> bool:
     return spec.multi or name in MULTI_SELECT_ASPECTS
 
 
+# Aspects with "Size" in the name that are NOT a size value at all, so must
+# not be resolved from the Measurements file's Size column. "Size Type" is
+# Regular/Petite/Tall/Plus/Maternity — a fit category, which the AI enum
+# path picks correctly from its short closed list (the account's real
+# Optiseller output filled it as "Regular" on every clothing row). Before
+# this was split out, it was silently skipped as an unmatched size; after
+# the raw-size pass-through in _resolve_size it would instead have been
+# filled with the garment's actual size (e.g. "40"), which eBay rejects.
+NOT_A_SIZE_ASPECTS = {"C:Size Type"}
+
+
 def _is_size_aspect(name: str) -> bool:
-    return "Size" in name and name not in DETERMINISTIC_ASPECTS
+    return "Size" in name and name not in DETERMINISTIC_ASPECTS and name not in NOT_A_SIZE_ASPECTS
 
 
 def _is_colour_aspect(name: str) -> bool:
@@ -145,11 +156,32 @@ def _resolve_size(name: str, product: Product, spec: ebay_template.AspectSpec) -
     raw = meas.get("Size")
     if name == "C:UK Shoe Size":
         # Measurements file's raw shoe "Size" is in EU sizing, not UK — see
-        # aspect_matching.EU_TO_UK_WOMENS_SHOE_SIZE / _MENS_SHOE_SIZE.
+        # aspect_matching.EU_TO_UK_WOMENS_SHOE_SIZE / _MENS_SHOE_SIZE. No raw
+        # pass-through here (unlike C:Size below): the raw number is on a
+        # different scale, so writing it into a UK field unconverted would
+        # be a wrong size, not a differently-formatted right one.
         return aspect_matching.match_shoe_size_uk(raw, spec.values, m.get("Gender"))
     if name == "C:EU Shoe Size":
         return aspect_matching.match_size(raw, spec.values)
-    return aspect_matching.match_size(raw, spec.values)
+    matched = aspect_matching.match_size(raw, spec.values)
+    if matched or name != "C:Size":
+        # Other size-family aspects (Waist Size, Chest Size, Ring Size, Cup
+        # Size...) measure something the plain Size column doesn't, so an
+        # unmatched raw value is left blank rather than passed through.
+        return matched
+    # No match against eBay's list — write the measured size through as-is.
+    # Sammy's call, 04.09.26: "these just need to be pushed into the SIZE
+    # column." Backed by the real Optiseller output file this account used
+    # to upload with (PreamatoFashionP45OutputFinalAug2026...xlsx): it
+    # writes raw sizes like 46, 39, 31, "33/32", "XXL", "4T" straight into
+    # C:Size for categories whose eBay list only "recommends" IT 46 / 2XL /
+    # etc., and eBay accepted every one — so Size on clothing categories is
+    # a free-text aspect with suggested values, not a closed list. The list
+    # is still matched against first so casing/aliases get normalised where
+    # they can be ("xl" -> "XL", "os" -> "One Size"); this is only the
+    # fallback for a size on a scale eBay's suggestions don't include.
+    raw = str(raw).strip() if raw is not None else ""
+    return raw or None
 
 
 def classify_aspects(
@@ -496,26 +528,25 @@ def generate_for_product(
                 #
                 # Two genuinely different causes end up here, and 04.09.26
                 # showed the old message conflated them into one misleading
-                # "no size in the file" line even when a size WAS present —
-                # it just didn't match any of this category's real eBay
-                # values (e.g. a raw "03" or "UK 8" against a picklist of
-                # letter sizes / even UK dress-size numbers only). Naming the
-                # raw value actually found, plus a sample of what eBay will
-                # accept here, makes each future case self-diagnosing
-                # without needing to dig through the code to find out which
-                # one it is.
+                # "no size in the file" line even when a size WAS present.
+                # Since C:Size now passes an unmatched raw value straight
+                # through (see _resolve_size), the "present but unusable"
+                # case is only reachable for a shoe-size field: a raw EU
+                # number the EU->UK conversion tables don't cover, or a
+                # non-numeric value. Naming the raw value found, plus a
+                # sample of what eBay expects, makes each case self-
+                # diagnosing without digging through the code.
                 raw_size = product.measurements.get("Size")
                 sample_values = ", ".join(spec.values[:12]) if spec.values else "(no closed list)"
                 more = f", +{len(spec.values) - 12} more" if spec.values and len(spec.values) > 12 else ""
                 if raw_size:
                     detail = (
                         f"the Measurements file has a size for this SKU ({raw_size!r}), but it "
-                        f"doesn't match any value eBay accepts for this category's {name!r} "
-                        f"field: {sample_values}{more}. This is a sizing-system mismatch (e.g. a "
-                        f"different scale than eBay's picklist for this category), not a missing "
-                        f"value — decide the correct eBay-accepted equivalent and either fix it in "
-                        f"the Measurements file, or extend the conversion logic in "
-                        f"aspect_matching.py to handle it."
+                        f"couldn't be converted to a value eBay accepts for this category's "
+                        f"{name!r} field: {sample_values}{more}. For shoes the raw size is "
+                        f"treated as EU sizing and converted via the EU->UK tables in "
+                        f"aspect_matching.py — check the value really is an EU size, or extend "
+                        f"those tables if it's outside their range."
                     )
                 else:
                     detail = (
