@@ -61,11 +61,15 @@ Usage
     python3 scripts/fetch_ebay_category_aspects.py --category-ids 53557 --dump-raw
 
     # Once that looks right, run for every category a department needs, e.g.
-    # Women's Shoes (category IDs from data/Ebay Category Codes.csv or the
-    # category picker):
+    # Women's Shoes. For more than a couple of categories, put names in a
+    # JSON file instead of --category-names — real eBay category names often
+    # contain commas ("Coats, Jackets & Waistcoats"), which breaks
+    # --category-names's own "id=Name,id=Name" splitting:
+    #   data/category_lists/womenswear_shoes_names.json:
+    #     {"53557": "Women's Shoes > Boots", "45333": "Women's Shoes > Flats", ...}
     python3 scripts/fetch_ebay_category_aspects.py \\
         --category-ids 53557,45333,55793,62107 \\
-        --category-names "Boots=/Clothes, Shoes & Accessories/Women/Women's Shoes/Boots" \\
+        --category-names-file data/category_lists/womenswear_shoes_names.json \\
         --output data/templates/womenswear_shoes.json
 
 The resulting .json file can be passed anywhere src/pipeline.py currently
@@ -265,10 +269,28 @@ def _parse_category_names_arg(raw: str | None) -> dict[str, str]:
     return out
 
 
+def _load_category_names_file(path: str | None) -> dict[str, str]:
+    """--category-names-file path/to/names.json -> {"id": "Name", ...}, loaded
+    straight from a JSON object. This is the option to actually use once
+    you're passing more than a couple of categories: --category-names splits
+    on "," between pairs, which silently breaks on any real eBay category
+    name that itself contains a comma (there are plenty — "Coats, Jackets &
+    Waistcoats", "Cookware, Dining & Bar", "Curtains, Blinds & Accessories",
+    etc. — the pair after the comma would get treated as a separate, broken
+    "pair" and dropped). A JSON file has no such ambiguity."""
+    if not path:
+        return {}
+    data = json.loads(Path(path).read_text())
+    if not isinstance(data, dict):
+        raise SystemExit(f"--category-names-file {path} must contain a JSON object of {{id: name}}")
+    return {str(k): str(v) for k, v in data.items()}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--category-ids", required=True, help="Comma-separated eBay category IDs, e.g. 53557,45333,55793")
-    parser.add_argument("--category-names", default="", help='Optional "id=Name,id=Name" — cosmetic only, doesn\'t affect matching')
+    parser.add_argument("--category-names", default="", help='Optional "id=Name,id=Name" — fine for a couple of categories, but breaks on names containing a comma. Prefer --category-names-file for anything bigger.')
+    parser.add_argument("--category-names-file", default="", help="Optional path to a JSON file of {id: name} — the reliable way to pass names for more than a couple of categories (see --category-names). These names are shown to the app's AI category-matcher, so real, descriptive names matter for match quality, they are not just cosmetic.")
     parser.add_argument("--marketplace", default="EBAY_GB")
     parser.add_argument("--output", required=True, help="Output .json path, e.g. data/templates/womenswear_shoes.json")
     parser.add_argument("--dump-raw", action="store_true", help="Print each raw API response (truncated) — use for the first-ever run to verify the parsing before trusting a full batch")
@@ -284,7 +306,8 @@ def main() -> None:
         )
 
     category_ids = [c.strip() for c in args.category_ids.split(",") if c.strip()]
-    category_names = _parse_category_names_arg(args.category_names)
+    category_names = _load_category_names_file(args.category_names_file)
+    category_names.update(_parse_category_names_arg(args.category_names))
 
     print("Requesting application token...")
     token = get_application_token(app_id, cert_id)
