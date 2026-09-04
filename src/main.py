@@ -93,7 +93,7 @@ def main() -> None:
 
     output_path = args.output or str(DEFAULT_OUTPUT_DIR / pipeline.default_output_filename())
 
-    results, considered, uncovered = pipeline.run(
+    results, considered, uncovered, failed = pipeline.run(
         master_path=args.master,
         measurements_path=args.measurements,
         template_path=args.template,
@@ -106,6 +106,14 @@ def main() -> None:
         price_percent=args.price_percent,
         on_progress=on_progress,
     )
+
+    total_rows = sum(len(r.rows) for r in results)
+    print(f"\n{considered} product(s) processed, {total_rows} listing(s) written, "
+          f"{len(failed) + len(uncovered)} not listed.")
+    if failed:
+        print(f"\n{len(failed)} product(s) failed and are NOT in the file:")
+        for f in failed:
+            print(f"  {f}")
 
     print(f"\n{len(results)} output file(s) written:")
     for r in results:

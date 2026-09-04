@@ -88,10 +88,18 @@ def run(
     price_percent: float = config.START_PRICE_RATIO * 100,
     combine_output: bool = True,
     on_progress: ProgressFn = _noop,
-) -> tuple[list[TemplateResult], int, list[str]]:
+) -> tuple[list[TemplateResult], int, list[str], list[str]]:
     """Runs the full pipeline. Returns (template_results, num_products_considered,
-    uncovered_skus) — uncovered_skus lists products whose (Category, SubCat2,
-    Gender) doesn't match any category in ANY of the given templates.
+    uncovered_skus, failed) — uncovered_skus lists products whose (Category,
+    SubCat2, Gender) doesn't match any category in ANY of the given templates,
+    and failed lists "SKU: reason" for every product that was dropped during
+    generation (an unresolvable Required size, an API error that survived its
+    retries).
+
+    Both are returned rather than only logged: on a 6-row test run a skipped
+    SKU is obvious, but on a 295-row batch the log line scrolls away and the
+    run ends on a green "generated 220 listings" with no hint that 75 are
+    missing or which ones. The caller is expected to show them.
 
     template_path is optional — pass None/[] to skip uploading a template
     manually and fall back automatically to data/templates/*.json, the
@@ -190,7 +198,7 @@ def run(
             "None of the matched products fall into a category covered by any given "
             "template — no output file produced.", 1.0
         )
-        return [], 0, uncovered_skus
+        return [], 0, uncovered_skus, []
 
     brands = {str(p.m("Brand")) for p, _, _ in assignments if p.m("Brand")}
     on_progress(f"Building brand descriptions for {len(brands)} brand(s)...", 0.2)
@@ -322,7 +330,34 @@ def run(
 
     # The checks report goes next to the CSV as well as into the run log, so
     # it can be read after the fact rather than scrolled back to.
-    report = validation.summarise(issues)
+    # The report opens with a reconciliation the numbers have to satisfy —
+    # products in, rows out, and every one that didn't make it, named. That
+    # is the first thing to read before uploading a batch.
+    rows_out = sum(len(tr.rows) for tr in template_results)
+    header = [
+        "COUNTS",
+        f"  {len(products)} product(s) read from the Pictures & Measurements file(s)",
+        f"  {len(assignments)} matched a category and were processed",
+        f"  {rows_out} listing(s) written to the CSV",
+    ]
+    if uncovered_skus:
+        header.append(f"  {len(uncovered_skus)} skipped: no template covers their category")
+    if errors:
+        header.append(f"  {len(errors)} skipped: failed during generation (listed below)")
+    if not uncovered_skus and not errors and rows_out == len(products):
+        header.append("  Nothing was dropped.")
+    header.append("")
+
+    if errors:
+        header.append(f"SKIPPED DURING GENERATION ({len(errors)}) — these are NOT in the CSV:")
+        header.extend(f"  {e}" for e in errors)
+        header.append("")
+    if uncovered_skus:
+        header.append(f"NO MATCHING CATEGORY ({len(uncovered_skus)}) — these are NOT in the CSV:")
+        header.extend(f"  {sku}" for sku in uncovered_skus)
+        header.append("")
+
+    report = "\n".join(header) + validation.summarise(issues)
     report_path = Path(output_path).with_name(Path(output_path).stem + "_checks.txt")
     report_path.write_text(report + "\n", encoding="utf-8")
 
@@ -341,4 +376,4 @@ def run(
 
     on_progress(f"Done — {len(template_results)} output file(s) written.", 1.0)
 
-    return template_results, len(assignments), uncovered_skus
+    return template_results, len(assignments), uncovered_skus, errors

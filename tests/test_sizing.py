@@ -85,9 +85,11 @@ def check(label, got, expected):
 
 # eBay's real UK Shoe Size lists, as the department templates carry them.
 UK_MENS = ["2", "2.5", "3", "3.5", "4", "4.5", "5", "5.5", "6", "6.5", "7", "7.5", "8",
-           "8.5", "9", "9.5", "10", "10.5", "11", "11.5", "12", "12.5", "13", "13.5", "14"]
+           "8.5", "9", "9.5", "10", "10.5", "11", "11.5", "12", "12.5", "13", "13.5",
+           "14", "14.5", "15", "15.5", "16", "16.5", "17", "17.5", "18", "18.5", "19"]
 UK_WOMENS = ["1", "1.5", "2", "2.5", "3", "3.5", "4", "4.5", "5", "5.5", "6", "6.5", "7",
-             "7.5", "8", "8.5", "9", "9.5", "10", "10.5", "11"]
+             "7.5", "8", "8.5", "9", "9.5", "10", "10.5", "11", "11.5", "12", "12.5",
+             "13", "13.5", "14", "14.5", "15", "15.5", "16", "16.5", "17", "17.5"]
 
 
 def test_no_wrong_shoe_size_is_ever_produced():
@@ -136,22 +138,131 @@ def test_numbers_only_ever_match_exactly():
           am.fuzzy_match("dolce&gabbana", ["Dolce & Gabbana"]), "Dolce & Gabbana")
 
 
+def test_bare_numbers_are_read_as_uk_and_flagged():
+    """Sammy's call, 04.09.26, on 63 rows of the QTN02 footwear parcel: a
+    bare number below EU range is a UK size, because the stock is UK-sourced
+    and that is how a UK shoe is marked. It is still an assumption, so
+    is_assumed_shoe_system has to be able to pick those rows out for spot
+    checking — converting silently is the part that would be dangerous."""
+    check("bare 7 reads as UK 7", am.match_shoe_size_uk("7", UK_WOMENS, "WOMEN"), "7")
+    check("bare 5.5 reads as UK 5.5", am.match_shoe_size_uk("5.5", UK_MENS, "MEN"), "5.5")
+    check("bare 9 reads as UK 9", am.match_shoe_size_uk("9", UK_MENS, "MEN"), "9")
+    # No gender needed: a UK size is a UK size, no table involved.
+    check("bare number needs no gender", am.match_shoe_size_uk("8", UK_MENS, "UNISEX"), "8")
+    # And it must never be written into the EU field. The list below is
+    # deliberately artificial (eBay's real EU list starts at 32, so a "9"
+    # could never match it anyway) — the point is to prove the guard itself
+    # refuses, rather than relying on the list happening not to contain it.
+    check("bare number is not an EU size", am.match_shoe_size_eu("9", ["9", "39", "40"]), None)
+
+    check("a bare number is flagged as assumed", am.is_assumed_shoe_system("9"), True)
+    check("a decimal bare number is flagged", am.is_assumed_shoe_system("7.5"), True)
+    check("an explicit UK size is not flagged", am.is_assumed_shoe_system("UK 9"), False)
+    check("an explicit US size is not flagged", am.is_assumed_shoe_system("US 9"), False)
+    check("an EU size is not flagged", am.is_assumed_shoe_system("45"), False)
+    check("a non-size is not flagged", am.is_assumed_shoe_system("1C-2C"), False)
+    check("blank is not flagged", am.is_assumed_shoe_system(None), False)
+
+
+def test_us_sizes_convert_by_gender():
+    """9 rows of the QTN02 parcel came in as "US9"/"US11". Women's UK is
+    US - 2, men's is US - 0.5; the two differ, so gender is required exactly
+    as it is for EU."""
+    check("US 9 women is UK 7", am.match_shoe_size_uk("US9", UK_WOMENS, "WOMEN"), "7")
+    check("US 8 women is UK 6", am.match_shoe_size_uk("US 8", UK_WOMENS, "WOMEN"), "6")
+    check("US 10 women is UK 8", am.match_shoe_size_uk("US10", UK_WOMENS, "WOMEN"), "8")
+    check("US 9 men is UK 8.5", am.match_shoe_size_uk("US9", UK_MENS, "MEN"), "8.5")
+    check("US 11 men is UK 10.5", am.match_shoe_size_uk("US11", UK_MENS, "MEN"), "10.5")
+    check("US 6 men is UK 5.5", am.match_shoe_size_uk("US 6", UK_MENS, "MEN"), "5.5")
+    # The whole point of two tables: the same US number is not the same UK
+    # number for men and women.
+    check("US 9 differs by gender",
+          am.match_shoe_size_uk("US9", UK_WOMENS, "WOMEN") != am.match_shoe_size_uk("US9", UK_MENS, "MEN"),
+          True)
+    check("US with unknown gender refused", am.match_shoe_size_uk("US9", UK_MENS, "UNISEX"), None)
+    check("US with blank gender refused", am.match_shoe_size_uk("US9", UK_MENS, None), None)
+    check("US outside the table refused", am.match_shoe_size_uk("US 30", UK_MENS, "MEN"), None)
+    # A US size must never be written into the EU field either. Artificial
+    # list again, for the same reason as above.
+    check("US is not an EU size", am.match_shoe_size_eu("US9", ["9", "39", "40"]), None)
+    check("UK is not an EU size", am.match_shoe_size_eu("UK 9", ["9", "39", "40"]), None)
+
+
+def test_a_size_range_is_carried_through_not_collapsed():
+    """Some boots really are made to fit a span of sizes — Moon Boot, and 3
+    pairs in the QTN02 parcel. This account has already sold one on eBay with
+    UK Shoe Size "10.5-12" and EU Shoe Size "45/47"
+    (data/account_listings_export.csv), so a range is a legitimate value and
+    collapsing it to one end would claim a fit the boot doesn't have."""
+    check("bare UK range passes through",
+          am.match_shoe_size_uk("2.5-3.5", UK_WOMENS, "WOMEN"), "2.5-3.5")
+    check("a UK range needs no gender",
+          am.match_shoe_size_uk("2.5-3.5", UK_MENS, "UNISEX"), "2.5-3.5")
+    check("the real sold example still resolves",
+          am.match_shoe_size_uk("10.5-12", UK_WOMENS, "WOMEN"), "10.5-12")
+    check("an EU range converts both ends",
+          am.match_shoe_size_uk("45/47", UK_MENS, "MEN"), "11-13")
+    check("an explicit EU range converts",
+          am.match_shoe_size_uk("EU 39-41", UK_WOMENS, "WOMEN"), "6-8")
+    check("a US range converts both ends",
+          am.match_shoe_size_uk("US 9-10", UK_MENS, "MEN"), "8.5-9.5")
+    check("an EU range fills the EU field too",
+          am.match_shoe_size_eu("45/47", ["44", "45", "46", "47"]), "45-47")
+    check("a UK range never fills the EU field",
+          am.match_shoe_size_eu("2.5-3.5", ["2.5", "3.5", "45"]), None)
+
+    # Both ends still go through the normal rules — a range can't smuggle a
+    # value past the conversion tables or the gender requirement.
+    check("an EU range still needs a gender",
+          am.match_shoe_size_uk("EU 39-41", UK_WOMENS, "UNISEX"), None)
+    check("a US range still needs a gender",
+          am.match_shoe_size_uk("US 9-10", UK_MENS, "UNISEX"), None)
+    check("a range spanning two scales is refused",
+          am.match_shoe_size_uk("30-40", UK_WOMENS, "WOMEN"), None)
+    # (Refused by the marker check, and would be refused by the conversion
+    # tables anyway — both ends go through one system's table.)
+    check("two different markers is refused",
+          am.match_shoe_size_uk("EU 39-UK 6", UK_WOMENS, "WOMEN"), None)
+    check("a backwards range is refused",
+          am.match_shoe_size_uk("3.5-2.5", UK_WOMENS, "WOMEN"), None)
+    check("a range with equal ends is refused",
+          am.match_shoe_size_uk("7-7", UK_WOMENS, "WOMEN"), None)
+    check("kids' US child notation is refused",
+          am.match_shoe_size_uk("1C-2C", UK_WOMENS, "GIRL"), None)
+    check("an EU range outside the table is refused",
+          am.match_shoe_size_uk("60-62", UK_MENS, "MEN"), None)
+
+    # And it is shown in the system it was recorded in, same rule as a
+    # single size.
+    check("a UK range reads as UK in the title",
+          am.size_display("2.5-3.5", uk_shoe="2.5-3.5"), "UK 2.5-3.5")
+    check("an EU range reads as EU in the title",
+          am.size_display("45/47", uk_shoe="11-13", eu_shoe="45-47"), "EU 45-47")
+    check("the description spells both out",
+          am.size_display("45/47", uk_shoe="11-13", eu_shoe="45-47", both=True),
+          "EU 45-47 (UK 11-13)")
+
+    # A bare range is read as UK on the same assumption as a bare number, so
+    # it has to be flagged for spot checking the same way.
+    check("a bare range is flagged as assumed", am.is_assumed_shoe_system("2.5-3.5"), True)
+    check("an EU range is not flagged", am.is_assumed_shoe_system("45/47"), False)
+    check("a US range is not flagged", am.is_assumed_shoe_system("US 9-10"), False)
+
+
 def test_ambiguous_sizes_are_refused_not_guessed():
-    """Anything that could be read two ways produces nothing, so the SKU is
-    skipped with a message rather than listed with a coin-flip size."""
-    # A bare number below EU range could be UK or US.
-    check("bare 7 is ambiguous", am.match_shoe_size_uk("7", UK_WOMENS, "WOMEN"), None)
-    check("bare 5.5 is ambiguous", am.match_shoe_size_uk("5.5", UK_MENS, "MEN"), None)
-    # US sizing has no conversion table.
-    check("US 9 refused", am.match_shoe_size_uk("US 9", UK_MENS, "MEN"), None)
+    """What still produces nothing, so the SKU is skipped with a message
+    rather than listed with a coin-flip size."""
     # Gender decides the table, so it must be known (EU 43 is UK 9 for men,
     # UK 10 for women — a full size apart).
     check("UNISEX refused", am.match_shoe_size_uk("43", UK_MENS, "UNISEX"), None)
     check("blank gender refused", am.match_shoe_size_uk("43", UK_MENS, None), None)
     check("GIRL refused", am.match_shoe_size_uk("37", UK_WOMENS, "GIRL"), None)
-    # Junk and ranges.
-    check("range refused", am.match_shoe_size_uk("39/40", UK_WOMENS, "WOMEN"), None)
+    # Junk. (A well-formed range like "39/40" is a real size and is handled
+    # in test_a_size_range_is_carried_through_not_collapsed — what stays
+    # refused is anything that isn't a size at all.)
     check("non-numeric refused", am.match_shoe_size_uk("abc", UK_WOMENS, "WOMEN"), None)
+    check("open-ended range refused", am.match_shoe_size_uk("39-", UK_WOMENS, "WOMEN"), None)
+    check("three-ended range refused", am.match_shoe_size_uk("38-39-40", UK_WOMENS, "WOMEN"), None)
     check("out-of-table EU refused", am.match_shoe_size_uk("60", UK_MENS, "MEN"), None)
     # An explicit UK size is used as-is, never re-converted.
     check("UK 7 stays 7", am.match_shoe_size_uk("UK 7", UK_WOMENS, "WOMEN"), "7")
@@ -291,6 +402,23 @@ def test_changing_a_sizing_rule_invalidates_the_cache():
 
     baseline = content_generator._sizing_fingerprint()
 
+    us_original = dict(aspect_matching.US_TO_UK_MENS_SHOE_SIZE)
+    try:
+        aspect_matching.US_TO_UK_MENS_SHOE_SIZE["9"] = "99"
+        check("changing the US table changes the cache fingerprint",
+              content_generator._sizing_fingerprint() != baseline, True)
+    finally:
+        aspect_matching.US_TO_UK_MENS_SHOE_SIZE.clear()
+        aspect_matching.US_TO_UK_MENS_SHOE_SIZE.update(us_original)
+
+    bare_original = aspect_matching.BARE_NUMBER_SHOE_SYSTEM
+    try:
+        aspect_matching.BARE_NUMBER_SHOE_SYSTEM = None
+        check("changing the bare-number rule changes the cache fingerprint",
+              content_generator._sizing_fingerprint() != baseline, True)
+    finally:
+        aspect_matching.BARE_NUMBER_SHOE_SYSTEM = bare_original
+
     original = dict(aspect_matching.EU_TO_UK_MENS_SHOE_SIZE)
     try:
         aspect_matching.EU_TO_UK_MENS_SHOE_SIZE["45"] = "12"
@@ -303,12 +431,38 @@ def test_changing_a_sizing_rule_invalidates_the_cache():
     check("fingerprint is stable when nothing changed",
           content_generator._sizing_fingerprint(), baseline)
 
+    # The mutation that motivated this: dropping a function from the
+    # fingerprint's input list leaves every test green while silently
+    # letting a stale cached size be re-served after a sizing fix. So the
+    # list is checked against the sizing code itself.
+    import inspect
+    hashed = {fn.__name__ for fn in content_generator._sizing_sources()}
+    must_be_hashed = {
+        "parse_shoe_size", "parse_shoe_size_range", "_resolve_range_end",
+        "_normalise_size_marker", "is_assumed_shoe_system", "match_shoe_size_uk",
+        "match_shoe_size_eu", "_eu_to_uk_table", "_us_to_uk_table",
+        "size_display", "enforce_title_size", "fuzzy_match", "match_size",
+    }
+    missing = sorted(must_be_hashed - hashed)
+    if missing:
+        FAILURES.append(
+            f"these decide a size but aren't in _sizing_sources(), so editing them "
+            f"would NOT invalidate the cache: {missing}")
+
+    # And every one of them must actually reach the hash.
+    material = "".join(inspect.getsource(fn) for fn in content_generator._sizing_sources())
+    for name in sorted(must_be_hashed):
+        if f"def {name}(" not in material:
+            FAILURES.append(f"{name}'s source never reaches the cache fingerprint")
+
 
 def test_conversion_tables_are_internally_consistent():
     """Guards against a typo in a table: every entry must be a real eBay UK
     value, and sizes must increase with EU size, never jump backwards."""
-    for name, table, valid in [("women's", am.EU_TO_UK_WOMENS_SHOE_SIZE, UK_WOMENS),
-                               ("men's", am.EU_TO_UK_MENS_SHOE_SIZE, UK_MENS)]:
+    for name, table, valid in [("women's EU", am.EU_TO_UK_WOMENS_SHOE_SIZE, UK_WOMENS),
+                               ("men's EU", am.EU_TO_UK_MENS_SHOE_SIZE, UK_MENS),
+                               ("women's US", am.US_TO_UK_WOMENS_SHOE_SIZE, UK_WOMENS),
+                               ("men's US", am.US_TO_UK_MENS_SHOE_SIZE, UK_MENS)]:
         entries = sorted(((float(eu), float(uk)) for eu, uk in table.items()))
         for eu, uk in entries:
             if str(uk).replace(".0", "") not in [v.replace(".0", "") for v in valid]:

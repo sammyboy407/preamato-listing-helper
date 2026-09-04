@@ -68,6 +68,27 @@ _CACHE_LOCK = threading.Lock()
 CACHE_VERSION = "v3"
 
 
+def _sizing_sources() -> list:
+    """Every function whose behaviour decides the size written to a listing.
+
+    Kept as an explicit list rather than inlined into _sizing_fingerprint so
+    a test can check it against the sizing code itself — an edit to a
+    function that isn't in here would leave the cache key unchanged, and a
+    stale cached size is indistinguishable from a fresh one in the output
+    file. That is exactly how the 04.09.26 batch went out with the old
+    conversion after the fix was already deployed."""
+    return [
+        _resolve_size, _is_size_aspect,
+        aspect_matching.enforce_title_size,
+        aspect_matching.match_shoe_size_uk, aspect_matching.match_shoe_size_eu,
+        aspect_matching.match_size, aspect_matching.size_display,
+        aspect_matching.fuzzy_match, aspect_matching.parse_shoe_size,
+        aspect_matching.parse_shoe_size_range, aspect_matching._resolve_range_end,
+        aspect_matching._normalise_size_marker, aspect_matching.is_assumed_shoe_system,
+        aspect_matching._eu_to_uk_table, aspect_matching._us_to_uk_table,
+    ]
+
+
 def _sizing_fingerprint() -> str:
     """A short hash of every function and table that determines the size
     written to a listing. Any edit to them changes the hash, which changes
@@ -76,17 +97,16 @@ def _sizing_fingerprint() -> str:
     import inspect
 
     parts = []
-    for fn in (_resolve_size, _is_size_aspect,
-               aspect_matching.enforce_title_size,
-               aspect_matching.match_shoe_size_uk, aspect_matching.match_size,
-               aspect_matching.size_display, aspect_matching.fuzzy_match,
-               aspect_matching.parse_shoe_size, aspect_matching._eu_to_uk_table):
+    for fn in _sizing_sources():
         try:
             parts.append(inspect.getsource(fn))
         except (OSError, TypeError):  # pragma: no cover - source always available in practice
             parts.append(repr(fn))
     parts.append(repr(sorted(aspect_matching.EU_TO_UK_MENS_SHOE_SIZE.items())))
     parts.append(repr(sorted(aspect_matching.EU_TO_UK_WOMENS_SHOE_SIZE.items())))
+    parts.append(repr(sorted(aspect_matching.US_TO_UK_MENS_SHOE_SIZE.items())))
+    parts.append(repr(sorted(aspect_matching.US_TO_UK_WOMENS_SHOE_SIZE.items())))
+    parts.append(repr(aspect_matching.BARE_NUMBER_SHOE_SYSTEM))
     parts.append(repr(sorted(aspect_matching.SIZE_ALIASES.items())))
     return hashlib.sha256("".join(parts).encode()).hexdigest()[:12]
 
@@ -782,29 +802,25 @@ def _size_failure_detail(name: str, product: Product, spec: ebay_template.Aspect
         system, number = aspect_matching.parse_shoe_size(raw_size)
         gender = str(product.master.get("Gender") or "").strip().upper()
         if system is None and number is not None:
+            # Only reachable if BARE_NUMBER_SHOE_SYSTEM is set back to None.
             return (
                 f"the Measurements file size {raw_size!r} is a bare number too small to be "
                 f"an EU shoe size, so it could be UK or US — record it as 'EU 38' / 'UK 5' "
                 f"style in the Measurements file so there's no ambiguity, and re-run."
             )
-        if system == "EU":
+        if system in ("EU", "US"):
             if gender not in ("MEN", "WOMEN"):
                 return (
-                    f"the Measurements file has an EU size ({raw_size!r}) but the Master File "
-                    f"Gender is {gender or '(blank)'!r}, and EU->UK differs by gender (EU 43 is "
-                    f"UK 9 for men, UK 10 for women) — so converting it would be a guess. Either "
-                    f"set Gender to MEN or WOMEN, or record the UK size directly (e.g. 'UK 9') "
-                    f"in the Measurements file."
+                    f"the Measurements file has an {system} size ({raw_size!r}) but the Master "
+                    f"File Gender is {gender or '(blank)'!r}, and {system}->UK differs by gender "
+                    f"(EU 43 is UK 9 for men, UK 10 for women) — so converting it would be a "
+                    f"guess. Either set Gender to MEN or WOMEN, or record the UK size directly "
+                    f"(e.g. 'UK 9') in the Measurements file."
                 )
             return (
-                f"the Measurements file size {raw_size!r} is an EU size outside the "
-                f"{'men' if gender == 'MEN' else 'women'}'s EU->UK conversion table in "
+                f"the Measurements file size {raw_size!r} is an {system} size outside the "
+                f"{'men' if gender == 'MEN' else 'women'}'s {system}->UK conversion table in "
                 f"aspect_matching.py — check the value, or extend the table if it's a real size."
-            )
-        if system == "US":
-            return (
-                f"the Measurements file size {raw_size!r} is a US size — only UK or EU "
-                f"sizes are converted. Record the EU or UK size in the Measurements file and re-run."
             )
         return (
             f"the Measurements file size {raw_size!r} isn't a recognisable shoe size "

@@ -27,7 +27,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from . import ebay_template
+from . import aspect_matching, ebay_template
 from .data_loader import Product, split_image_urls
 
 MAX_TITLE_LENGTH = 80
@@ -92,6 +92,8 @@ def check_row(
     _check_photos(sku, row, issues)
     _check_price(sku, row, issues)
     _check_measurements(sku, product, issues)
+    _check_assumed_size(sku, product, row, issues)
+    _check_range_size(sku, product, row, issues)
     _check_length_contradictions(sku, row, issues)
     _check_description_gaps(sku, row, issues)
 
@@ -181,6 +183,44 @@ def _check_measurements(sku, product, issues):
             issues.append(Issue(
                 sku, "REVIEW",
                 f"{column} is {value:g}, outside the plausible {low}–{high} inches — check for a typo or a cm value"))
+
+
+def _check_assumed_size(sku, product, row, issues):
+    """A shoe size recorded as a bare number ("9") carries no system marker,
+    so reading it as UK 9 is an assumption, not a fact — right for UK-sourced
+    stock, half a size out if the pair was actually marked US 9.
+
+    Sammy's call, 04.09.26: convert them so the stock lists, but name every
+    one here so a few can be checked against the physical shoes before the
+    batch goes up. Only fires where it matters — a row that actually ended up
+    with a UK shoe size on it."""
+    uk_size = _text(row.get("C:UK Shoe Size"))
+    if not uk_size:
+        return
+    raw = product.measurements.get("Size")
+    if aspect_matching.is_assumed_shoe_system(raw):
+        issues.append(Issue(
+            sku, "REVIEW",
+            f"size was recorded as a bare {_text(raw)!r} with no UK/EU/US marker, so it was "
+            f"read as UK {uk_size} — check this pair against the shoe before uploading"))
+
+
+def _check_range_size(sku, product, row, issues):
+    """A boot sold to fit a span of sizes ("2.5-3.5", "45/47" — Moon Boot
+    being the usual case) carries that range into the item specific rather
+    than being collapsed to one end. This account has already sold one that
+    way (UK Shoe Size "10.5-12"), so eBay accepts it, but the value is off
+    eBay's dropdown list and acceptance can vary by category — so each one is
+    named here to be watched on its first upload rather than discovered as a
+    rejection."""
+    uk_size = _text(row.get("C:UK Shoe Size"))
+    if "-" not in uk_size:
+        return
+    raw = _text(product.measurements.get("Size"))
+    issues.append(Issue(
+        sku, "REVIEW",
+        f"sized as a range ({raw!r}), listed as UK {uk_size} rather than collapsed to one "
+        f"end — check eBay accepts the range on this category"))
 
 
 def _check_length_contradictions(sku, row, issues):

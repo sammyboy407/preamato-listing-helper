@@ -290,7 +290,7 @@ if run_clicked:
                 progress_bar.progress(min(max(frac, 0.0), 1.0))
 
         try:
-            results, considered, uncovered = pipeline.run(
+            results, considered, uncovered, failed = pipeline.run(
                 master_path=master_paths,
                 measurements_path=measurements_paths,
                 template_path=template_paths,
@@ -317,6 +317,21 @@ if run_clicked:
                 st.success(f"Done — generated {total_rows} listing(s) across {len(persisted)} output file(s).")
             else:
                 st.info("None of these products fall into a category covered by the template(s) you uploaded — no output file produced.")
+            # Reconciliation, shown before anything else: on a big batch a
+            # skipped SKU used to leave no trace but one log line that had
+            # already scrolled out of the box, so a run could quietly come
+            # back short and look like a success.
+            st.info(
+                f"{considered} product(s) processed, {total_rows} listing(s) written, "
+                f"{len(failed) + len(uncovered)} not listed."
+            )
+            if failed:
+                st.error(
+                    f"{len(failed)} product(s) failed and are NOT in the file. "
+                    f"They need fixing and re-running:"
+                )
+                for f in failed:
+                    st.markdown(f"- {f}")
             if uncovered:
                 st.warning(
                     f"{len(uncovered)} product(s) aren't covered by any given template's "

@@ -182,6 +182,44 @@ def test_empty_description_line():
           any("line is empty" in m for m in messages(run(good_row(), size="8"))), False)
 
 
+def test_an_assumed_uk_size_is_flagged_for_spot_checking():
+    """A bare "9" is converted (Sammy's call — the stock is UK-sourced), but
+    every row that relied on that assumption has to be named in the report so
+    a few can be checked against the physical shoes. Silent conversion is the
+    dangerous version."""
+    product = make_product({"Size": "9"}, brand="ROA")
+    row = good_row(Title="ROA Boots Brown UK 9 RRP 395", **{"C:UK Shoe Size": "9"})
+    check("assumed size flagged",
+          any("no UK/EU/US marker" in m for m in messages(run(row, product=product, size="UK 9"))), True)
+
+    explicit = make_product({"Size": "UK 9"}, brand="ROA")
+    check("an explicit UK size is not flagged",
+          any("no UK/EU/US marker" in m for m in messages(run(row, product=explicit, size="UK 9"))), False)
+
+    eu = make_product({"Size": "45"}, brand="ROA")
+    check("an EU size is not flagged",
+          any("no UK/EU/US marker" in m for m in messages(run(row, product=eu, size="EU 45"))), False)
+
+    check("a row with no shoe size is not flagged",
+          any("no UK/EU/US marker" in m for m in messages(run(good_row(), product=product, size="8"))), False)
+
+
+def test_a_range_size_is_named_in_the_report():
+    """The range is a value off eBay's dropdown list. It has been accepted
+    before, but each one is named so a rejection is spotted on the first
+    upload rather than found later."""
+    product = make_product({"Size": "2.5-3.5"}, brand="MOON BOOT")
+    row = good_row(Title="MOON BOOT Snow Boots White UK 2.5-3.5 RRP 250",
+                   **{"C:UK Shoe Size": "2.5-3.5"})
+    check("range size named",
+          any("sized as a range" in m for m in messages(run(row, product=product, size="UK 2.5-3.5"))), True)
+
+    single = good_row(Title="MOON BOOT Snow Boots White UK 3 RRP 250", **{"C:UK Shoe Size": "3"})
+    check("a single size is not named",
+          any("sized as a range" in m for m in
+              messages(run(single, product=make_product({"Size": "UK 3"}), size="UK 3"))), False)
+
+
 def test_the_report_reads_like_something_a_person_would_act_on():
     check("a clean batch says so", validation.summarise([]), "All listings passed every check.")
     report = validation.summarise([
