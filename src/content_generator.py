@@ -77,10 +77,18 @@ MEASUREMENT_ASPECTS = {
 # Aspects eBay allows multiple selected values for (entered pipe-separated in
 # the bulk CSV, e.g. "Casual|Workwear|Travel"). Sammy asked specifically for
 # Occasion 04.09.26: pick every occasion that genuinely fits, not just one,
-# since buyers filter search results by it. Only Occasion is in this set for
-# now — other eBay aspects that also support multiple values (Features,
-# Character, Theme, etc.) aren't confirmed as wanted here yet.
+# since buyers filter search results by it. Only Occasion is hand-listed
+# here for now — other eBay aspects that also support multiple values
+# (Features, Character, Theme, etc.) aren't confirmed as wanted here yet.
+# For a template loaded via scripts/fetch_ebay_category_aspects.py (see
+# ebay_template.AspectSpec.multi), eBay's own real cardinality answer is
+# used automatically as well — this set only fills the gap for .xlsx-sourced
+# templates, which have no column that says whether a field is multi-select.
 MULTI_SELECT_ASPECTS = {"C:Occasion"}
+
+
+def _is_multi_select(name: str, spec: ebay_template.AspectSpec) -> bool:
+    return spec.multi or name in MULTI_SELECT_ASPECTS
 
 
 def _is_size_aspect(name: str) -> bool:
@@ -173,7 +181,7 @@ def classify_aspects(
         if spec.values is None:
             skipped[name] = spec  # free text, not inferable — left blank
             continue
-        if name in MULTI_SELECT_ASPECTS:
+        if _is_multi_select(name, spec):
             multi_specs[name] = spec
             continue
         if _is_colour_aspect(name):

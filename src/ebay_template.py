@@ -38,6 +38,16 @@ class AspectSpec:
     name: str  # e.g. "C:Colour"
     level: str  # "REQUIRED" | "PREFERRED" | "OPTIONAL"
     values: list[str] | None  # None means free text (no closed list)
+    # True when eBay allows multiple selected values for this aspect (its
+    # own itemToAspectCardinality == "MULTI"). Only ever set when this
+    # template was loaded from scripts/fetch_ebay_category_aspects.py's API
+    # output (see load_json_template) — a real, per-aspect answer from eBay,
+    # rather than content_generator.MULTI_SELECT_ASPECTS's hand-maintained
+    # guesswork (which is what an .xlsx-sourced template still has to rely
+    # on, since the Seller Hub download has no column for this at all — see
+    # that module's docstring). Defaults to False so existing .xlsx-sourced
+    # templates behave exactly as before.
+    multi: bool = False
 
 
 @dataclass
@@ -127,7 +137,52 @@ def _parse_listing_sheet_preamble(wb) -> tuple[list[str], list[list[str]]]:
     raise ValueError("Could not find the header row in the template's 'Listings' sheet.")
 
 
+def load_json_template(path: str | Path) -> EbayTemplate:
+    """Loads a template produced by scripts/fetch_ebay_category_aspects.py —
+    the API-driven alternative to downloading a real "Create listings in
+    bulk" .xlsx from Seller Hub by hand. Same EbayTemplate shape either way,
+    so build.py/content_generator.py/category_mapping.py don't need to know
+    or care which source a given template came from."""
+    import json
+
+    data = json.loads(Path(path).read_text())
+
+    categories = [
+        CategorySpec(
+            category_id=str(c["category_id"]),
+            category_name=c["category_name"],
+            conditions=[(int(cid), label) for cid, label in c.get("conditions", [])],
+        )
+        for c in data.get("categories", [])
+    ]
+
+    aspects: dict[str, dict[str, AspectSpec]] = {}
+    for cat_id, cat_aspects in data.get("aspects", {}).items():
+        aspects[str(cat_id)] = {
+            name: AspectSpec(
+                name=name,
+                level=spec.get("level", "OPTIONAL"),
+                values=spec.get("values"),
+                multi=bool(spec.get("multi", False)),
+            )
+            for name, spec in cat_aspects.items()
+        }
+
+    return EbayTemplate(
+        listing_headers=data.get("listing_headers", []),
+        categories=categories,
+        aspects=aspects,
+        info_rows=data.get("info_rows", []),
+    )
+
+
 def load_template(path: str | Path) -> EbayTemplate:
+    """Dispatches on file extension: a .json file is API-sourced (see
+    load_json_template above); anything else is treated as a real eBay
+    "Create listings in bulk" .xlsx export, parsed as before."""
+    if str(path).lower().endswith(".json"):
+        return load_json_template(path)
+
     wb = python_calamine.CalamineWorkbook.from_path(str(path))
     header, info_rows = _parse_listing_sheet_preamble(wb)
     return EbayTemplate(
