@@ -24,6 +24,18 @@ rows is treated as optional; a column never filled in for that category
 is left out of its aspect set entirely, matching how a real category's
 Aspects would simply not list an inapplicable field.
 
+Exception: standardized size systems (UK/EU/US/AU Shoe Size — see
+STANDARD_SIZE_VALUES) use eBay's real full closed list unioned with
+whatever this account's history adds, not just the history alone. "Every
+value this account has ever sold" is a bad proxy for "every value eBay
+will accept" here specifically — confirmed 04.09.26 when a real upload
+failed 5/5 on "the item specific UK Shoe Size is missing" for sizes that
+were perfectly valid, just never sold before, so the narrow
+historically-derived pool (as few as 2-3 values for some categories)
+rejected them. Every other aspect keeps the pure-historical derivation —
+this override is specifically for closed, standardized, universally-known
+size systems, not a general fix.
+
 The #INFO preamble and the fixed prefix/suffix listing columns are
 identical across every real per-category template observed (they don't
 vary with which categories were selected when downloading) — hardcoded
@@ -110,6 +122,44 @@ LISTING_SUFFIX_HEADERS = [
 # are written by header name lookup, so this has no functional effect).
 _PRIORITY_ASPECTS = ["Brand", "Department", "Colour", "Country of Origin", "Size", "Style", "Material"]
 
+# Standardized size systems where "every value this account has ever sold"
+# (the default derivation below) is a bad proxy for "every value eBay will
+# actually accept." A shoe size that's never been sold before is still a
+# perfectly valid eBay value — but the default per-category value pool only
+# contains sizes actually seen in this account's history, so a real
+# (correctly deterministically-converted, in aspect_matching.py) size like
+# UK 5.5 gets silently rejected by the >=0.9-cutoff fuzzy match against a
+# pool that might only contain 2-3 historically-sold sizes, leaving a
+# REQUIRED field blank and the whole listing rejected by eBay at upload —
+# confirmed 04.09.26 against a real failed upload (5/5 failures, all
+# "the item specific UK Shoe Size is missing", each one a genuinely valid
+# size that just hadn't been sold before). These are the real, full,
+# category-independent closed lists eBay uses for adult footwear (extracted
+# from a real downloaded "Create listings in bulk" template's Aspects
+# sheet — this is standardized sizing, not account-specific data, so it's
+# safe to apply the same list to every category rather than re-deriving it
+# per account). Still unioned with whatever this account's own history adds
+# (see _size_values below), never *only* the history.
+STANDARD_SIZE_VALUES: dict[str, list[str]] = {
+    "C:UK Shoe Size": [str(x / 2) if x % 2 else str(x // 2) for x in range(2, 39)],
+    "C:US Shoe Size": [str(x / 2) if x % 2 else str(x // 2) for x in range(6, 41)],
+    "C:AU Shoe Size": [str(x / 2) if x % 2 else str(x // 2) for x in range(2, 40)],
+    "C:EU Shoe Size": [str(x / 2) if x % 2 else str(x // 2) for x in range(64, 114)],
+}
+
+
+def _size_values(aspect_name: str, historical_values: list[str]) -> list[str]:
+    """The value pool to actually validate against for this aspect: the full
+    standard range for a known standardized size system, unioned with
+    anything this account's own history has that the standard list doesn't
+    (e.g. EU's odd third-fraction sizes like "38 2/3", which aren't in the
+    plain-half-size standard list above) — union, not replace, so real
+    historical values are never lost."""
+    standard = STANDARD_SIZE_VALUES.get(aspect_name)
+    if not standard:
+        return sorted(set(historical_values))
+    return sorted(set(standard) | set(historical_values), key=lambda v: (len(v), v))
+
 
 def _category_name(category_id: str) -> str:
     return KNOWN_CATEGORY_NAMES.get(category_id, f"Category {category_id} (name not verified — check Seller Hub)")
@@ -167,8 +217,8 @@ def build_template(export_path: str | Path = DEFAULT_EXPORT_PATH) -> EbayTemplat
                 continue
             fill_rate = len(values_seen) / n
             level = "REQUIRED" if fill_rate >= REQUIRED_FILL_RATE else "OPTIONAL"
-            distinct_values = sorted(set(values_seen))
             aspect_name = f"C:{col}"
+            distinct_values = _size_values(aspect_name, values_seen)
             cat_aspects[aspect_name] = AspectSpec(name=aspect_name, level=level, values=distinct_values)
             all_aspect_names.add(aspect_name)
         aspects[cat_id] = cat_aspects
