@@ -19,7 +19,9 @@ from datetime import date
 from pathlib import Path
 from typing import Callable
 
-from . import brand_blurb, build, builtin_catalog, category_mapping, config, content_generator, data_loader, ebay_template
+from . import (brand_blurb, build, builtin_catalog, category_mapping, config,
+               content_generator, data_loader, ebay_template, validation)
+from . import aspect_matching
 
 ProgressFn = Callable[[str, float | None], None]
 
@@ -228,12 +230,29 @@ def run(
 
     on_progress("Assembling output rows...", 0.92)
     results_by_template: dict[int, TemplateResult] = {}
+    issues: list[validation.Issue] = []
     for p, idx, entry in assignments:
         if p.sku not in ai_results:
             continue
         template = templates[idx]
         category = template.category_by_id(entry["category_id"])
         row = build.build_row(p, ai_results[p.sku], category, template, blurb_cache, schedule_time, price_percent)
+
+        # Deterministic checks, run per row before anything is written (see
+        # validation.py). Free — no AI call, no measurable time — and they
+        # cover the failures that have actually reached eBay or a buyer:
+        # an empty REQUIRED item specific, a title that lost its size, a
+        # listing that contradicts itself, a mistyped measurement.
+        specifics = ai_results[p.sku].get("item_specifics", {})
+        issues.extend(validation.check_row(
+            p, row, category, template,
+            size_for_display=aspect_matching.size_display(
+                p.measurements.get("Size"),
+                uk_shoe=specifics.get("C:UK Shoe Size"),
+                eu_shoe=specifics.get("C:EU Shoe Size"),
+                clothing_size=specifics.get("C:Size"),
+            ),
+        ))
 
         if idx not in results_by_template:
             results_by_template[idx] = TemplateResult(
@@ -300,6 +319,25 @@ def run(
             build.write_csv(tr.rows, templates[idx], tr.output_path)
             on_progress(f"Wrote {len(tr.rows)} rows to {tr.output_path}", None)
             template_results.append(tr)
+
+    # The checks report goes next to the CSV as well as into the run log, so
+    # it can be read after the fact rather than scrolled back to.
+    report = validation.summarise(issues)
+    report_path = Path(output_path).with_name(Path(output_path).stem + "_checks.txt")
+    report_path.write_text(report + "\n", encoding="utf-8")
+
+    reviews = [i for i in issues if i.kind == "REVIEW"]
+    fixes = [i for i in issues if i.kind == "FIX"]
+    if fixes:
+        on_progress(f"{len(fixes)} thing(s) corrected automatically.", None)
+    if reviews:
+        on_progress(
+            f"{len(reviews)} thing(s) worth a look across "
+            f"{len({i.sku for i in reviews})} listing(s) — see {report_path.name}:", None)
+        for issue in reviews:
+            on_progress(f"    {issue.sku}: {issue.message}", None)
+    else:
+        on_progress("All listings passed every check.", None)
 
     on_progress(f"Done — {len(template_results)} output file(s) written.", 1.0)
 

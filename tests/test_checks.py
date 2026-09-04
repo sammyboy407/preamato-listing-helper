@@ -1,0 +1,212 @@
+"""Tests for the deterministic listing checks (src/validation.py).
+
+Same principle as the sizing suite: each check is fed input that should trip
+it and input that shouldn't, so a check can't quietly stop working or start
+crying wolf. A noisy check is nearly as bad as a missing one — if the report
+is full of things that don't matter, the one that does gets skimmed past.
+
+    python3 tests/test_checks.py
+"""
+from __future__ import annotations
+
+import sys
+import types
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# Same stubs as tests/test_sizing.py — see the comment there.
+for _dep in ("anthropic", "openpyxl", "python_calamine"):
+    try:
+        __import__(_dep)
+    except ModuleNotFoundError:  # pragma: no cover - depends on the machine
+        _stub = types.ModuleType(_dep)
+
+        class _StubModule(types.ModuleType):
+            def __getattr__(self, name):
+                value = type(name, (Exception,), {})
+                setattr(self, name, value)
+                return value
+
+        _stub.__class__ = _StubModule
+        sys.modules[_dep] = _stub
+
+from src import validation  # noqa: E402
+from src.data_loader import Product  # noqa: E402
+from src.ebay_template import AspectSpec, CategorySpec, EbayTemplate  # noqa: E402
+
+FAILURES: list[str] = []
+
+
+def check(label, got, expected):
+    if got != expected:
+        FAILURES.append(f"{label}\n      expected: {expected!r}\n      got:      {got!r}")
+
+
+CATEGORY = CategorySpec(category_id="63864", category_name="Women's Clothing > Skirts",
+                        conditions=[(3000, "Pre-owned - Good")])
+
+
+def make_template(aspects=None):
+    return EbayTemplate(
+        listing_headers=[],
+        categories=[CATEGORY],
+        aspects={"63864": aspects or {}},
+        info_rows=[],
+    )
+
+
+def make_product(measurements=None, brand="SIMONE ROCHA"):
+    return Product(
+        sku="TEST-001",
+        master={"Brand": brand, "Gender": "WOMEN", "Colour": "White"},
+        measurements=measurements or {},
+    )
+
+
+def good_row(**overrides):
+    row = {
+        "Custom label (SKU)": "TEST-001",
+        "Title": "SIMONE ROCHA Tiered Mini Skirt White 8 RRP 695",
+        "Item photo URL": "http://a|http://b|http://c",
+        "Start price": 350,
+        "OriginalRetailPrice": 695,
+        "Description": "Brand: SIMONE ROCHA <br>\nSize: 8 <br>",
+        "C:Style": "Mini",
+    }
+    row.update(overrides)
+    return row
+
+
+def run(row, product=None, aspects=None, size=None):
+    return validation.check_row(product or make_product(), row, CATEGORY,
+                                make_template(aspects), size_for_display=size)
+
+
+def messages(issues, kind=None):
+    return [i.message for i in issues if kind is None or i.kind == kind]
+
+
+def test_a_clean_listing_produces_no_noise():
+    """The most important test here. A check that fires on a good listing
+    makes the whole report worthless."""
+    check("clean listing is silent", run(good_row(), size="8"), [])
+
+
+def test_missing_required_item_specific_is_caught():
+    """The exact failure that got every listing rejected by eBay on
+    04.09.26 ("The item specific Brand is missing")."""
+    aspects = {
+        "C:Brand": AspectSpec("C:Brand", "REQUIRED", None),
+        "C:Colour": AspectSpec("C:Colour", "REQUIRED", None),
+        "C:Pattern": AspectSpec("C:Pattern", "OPTIONAL", None),
+    }
+    issues = run(good_row(**{"C:Brand": "Simone Rocha"}), aspects=aspects, size="8")
+    found = messages(issues)
+    check("empty REQUIRED aspect is reported", any("C:Colour is required" in m for m in found), True)
+    check("filled REQUIRED aspect is not reported", any("C:Brand is required" in m for m in found), False)
+    check("empty OPTIONAL aspect is not reported", any("C:Pattern" in m for m in found), False)
+
+
+def test_self_contradicting_listing_is_caught_but_not_silently_changed():
+    """Sammy's Simone Rocha: Style "Mini", Skirt Length "Midi". Reported,
+    never auto-corrected — the code can't tell which side is wrong, and
+    guessing is how a wrong listing ships."""
+    row = good_row(**{"C:Style": "Mini", "C:Skirt Length": "Midi"})
+    issues = run(row, size="8")
+    check("contradiction reported", any("contradict" in m for m in messages(issues)), True)
+    check("nothing auto-corrected", messages(issues, "FIX"), [])
+    check("the row is left exactly as it was", row["C:Skirt Length"], "Midi")
+
+    consistent = good_row(**{"C:Style": "Mini", "C:Skirt Length": "Short"})
+    check("a consistent pair is silent",
+          any("contradict" in m for m in messages(run(consistent, size="8"))), False)
+
+
+def test_title_problems():
+    long_title = "SIMONE ROCHA " + ("Very Long Description " * 6) + "RRP 695"
+    row = good_row(Title=long_title)
+    issues = run(row, size=None)
+    check("over-length title is trimmed", len(row["Title"]) <= validation.MAX_TITLE_LENGTH, True)
+    check("the trim is reported as a FIX", any("trimmed" in m for m in messages(issues, "FIX")), True)
+
+    check("missing brand is reported",
+          any("brand" in m for m in messages(run(good_row(Title="Tiered Mini Skirt White 8")))), True)
+    check("a title missing the resolved size is reported",
+          any("resolved size" in m for m in messages(run(good_row(Title="SIMONE ROCHA Skirt White"), size="8"))), True)
+    check("repeated words are reported",
+          any("repeats" in m for m in messages(run(good_row(Title="SIMONE ROCHA Skirt Skirt White 8"), size="8"))), True)
+
+
+def test_photos_and_price():
+    check("no photos reported",
+          any("no photos" in m for m in messages(run(good_row(**{"Item photo URL": ""})), )), True)
+    check("too few photos reported",
+          any("only 1 photo" in m for m in messages(run(good_row(**{"Item photo URL": "http://a"})))), True)
+    check("zero price reported",
+          any("zero or missing" in m for m in messages(run(good_row(**{"Start price": 0})))), True)
+    check("price above RRP reported",
+          any("above the RRP" in m for m in messages(run(good_row(**{"Start price": 900})))), True)
+    check("a sane price is silent",
+          any("price" in m for m in messages(run(good_row(), size="8"))), False)
+
+
+def test_mistyped_measurements():
+    """A slipped decimal (230 for 23) or a centimetre value in an inches
+    column. Bounds are wide on purpose — this is for data-entry slips, not
+    for second-guessing an unusual garment."""
+    typo = make_product({"Pit to Pit (inches)": "230"})
+    check("implausible measurement reported",
+          any("plausible" in m for m in messages(run(good_row(), product=typo, size="8"))), True)
+
+    cm = make_product({"Length (inches)": "90"})  # 90cm typed into an inches column
+    check("a cm value reported",
+          any("plausible" in m for m in messages(run(good_row(), product=cm, size="8"))), True)
+
+    real = make_product({"Pit to Pit (inches)": "23", "Length (inches)": "37", "Arm (inches)": "26"})
+    check("real measurements are silent",
+          any("plausible" in m for m in messages(run(good_row(), product=real, size="8"))), False)
+
+    check("non-numeric measurement reported",
+          any("isn't a number" in m for m in
+              messages(run(good_row(), product=make_product({"Arm (inches)": "approx 26"}), size="8"))), True)
+
+
+def test_empty_description_line():
+    """A bare "Type: " line in the buyer-facing description looks
+    unfinished. Seen on a real 04.09.26 listing."""
+    row = good_row(Description="Brand: SIMONE ROCHA <br>\nType:  <br>\nSize: 8 <br>")
+    check("empty description line reported",
+          any("line is empty" in m for m in messages(run(row, size="8"))), True)
+    check("a complete description is silent",
+          any("line is empty" in m for m in messages(run(good_row(), size="8"))), False)
+
+
+def test_the_report_reads_like_something_a_person_would_act_on():
+    check("a clean batch says so", validation.summarise([]), "All listings passed every check.")
+    report = validation.summarise([
+        validation.Issue("SKU-1", "REVIEW", "something to look at"),
+        validation.Issue("SKU-1", "REVIEW", "something else"),
+        validation.Issue("SKU-2", "FIX", "something corrected"),
+    ])
+    check("groups by SKU", report.count("SKU-1"), 1)
+    check("counts the reviews", "2 thing(s) to look at" in report, True)
+    check("counts the fixes separately", "1 thing(s) corrected automatically" in report, True)
+
+
+def main():
+    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+    for t in tests:
+        t()
+    print(f"Ran {len(tests)} listing-check tests.")
+    if FAILURES:
+        print(f"\n{len(FAILURES)} FAILURE(S):\n")
+        for f in FAILURES:
+            print(f"  ✗ {f}\n")
+        return 1
+    print("All listing checks behave correctly. ✓")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
