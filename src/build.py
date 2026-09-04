@@ -255,10 +255,36 @@ def _csv_cell(value):
     return value
 
 
-def output_headers(template: ebay_template.EbayTemplate) -> list[str]:
+def output_headers(template: ebay_template.EbayTemplate, rows: list[dict] | None = None) -> list[str]:
     """The template's own header row plus any EXTRA_COLUMNS it didn't
-    already include."""
-    return template.listing_headers + [c for c in EXTRA_COLUMNS if c not in template.listing_headers]
+    already include, plus — when rows are given — any other field the rows
+    actually contain that isn't covered by either of those.
+
+    That third part matters a lot for the JSON department templates (see
+    scripts/fetch_ebay_category_aspects.py): their listing_headers is just
+    FIXED_LISTING_HEADERS_PREFIX, the same ~19 generic columns for every
+    category, with none of a category's own item-specific ("C:...") columns
+    in it — unlike a real, manually-downloaded .xlsx template, whose
+    Listings sheet already lists every aspect column for the one category
+    it was downloaded for. Without this, every C:Brand/C:Size/C:Colour/etc.
+    value content_generator.py correctly computed in memory was being
+    silently dropped from the actual output CSV for a JSON template run —
+    the row dict had the key, but write_csv only ever wrote the columns
+    named here, so the value never made it to the file at all. Found
+    04.09.26 right before a real 200-listing weekend batch, by checking
+    what output_headers actually returned against a real department
+    template rather than assuming the JSON and .xlsx paths matched.
+
+    Sorted alphabetically since one CSV can span rows from several
+    categories, each with its own aspect set — there's no single natural
+    order across all of them, and a stable order matters more than a
+    "nice" one so re-runs don't shuffle columns around."""
+    headers = template.listing_headers + [c for c in EXTRA_COLUMNS if c not in template.listing_headers]
+    if rows:
+        seen = set(headers)
+        extra = sorted({k for row in rows for k in row if k not in seen})
+        headers += extra
+    return headers
 
 
 def write_csv(rows: list[dict], template: ebay_template.EbayTemplate, output_path: str | Path) -> None:
@@ -269,7 +295,7 @@ def write_csv(rows: list[dict], template: ebay_template.EbayTemplate, output_pat
     extended width so the file stays rectangular, then the (extended)
     header row, then data. No other sheets. utf-8-sig so Excel (incl. on
     Windows) auto-detects UTF-8 and renders the £ symbol correctly."""
-    headers = output_headers(template)
+    headers = output_headers(template, rows)
     with open(output_path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
         for info_row in template.info_rows:

@@ -84,6 +84,7 @@ def run(
     force_regenerate: bool = False,
     schedule_time: str | None = None,
     price_percent: float = config.START_PRICE_RATIO * 100,
+    combine_output: bool = True,
     on_progress: ProgressFn = _noop,
 ) -> tuple[list[TemplateResult], int, list[str]]:
     """Runs the full pipeline. Returns (template_results, num_products_considered,
@@ -104,7 +105,17 @@ def run(
     takes priority and is still stricter/more accurate (real Required/
     Preferred/Optional flags and closed value lists) where it covers a
     category, so pass one when you specifically want to override the
-    department defaults for a category."""
+    department defaults for a category.
+
+    combine_output controls whether all matched rows land in one CSV or one
+    per template. Since running with no manual upload now spans up to 9
+    department templates, a real batch used to always come back as up to 9
+    separate files even though every department template shares the exact
+    same base column layout (FIXED_LISTING_HEADERS_PREFIX) — needlessly
+    inconvenient for a real bulk upload, where one file covering every
+    category is normal (a real eBay bulk template already mixes many
+    categories' rows in one sheet). Defaults to True; set False to get the
+    old one-file-per-template behaviour back."""
     Path(cache_dir).mkdir(parents=True, exist_ok=True)
     template_paths = template_path if isinstance(template_path, list) else ([template_path] if template_path else [])
     used_default_departments = False
@@ -236,12 +247,59 @@ def run(
             tr.category_names.append(category.category_name)
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    template_results = []
-    for idx in sorted(results_by_template):
-        tr = results_by_template[idx]
-        build.write_csv(tr.rows, templates[idx], tr.output_path)
-        on_progress(f"Wrote {len(tr.rows)} rows to {tr.output_path}", None)
-        template_results.append(tr)
+
+    if combine_output and len(results_by_template) > 1:
+        # One CSV covering every matched row across every template that
+        # contributed any, rather than one file per template. Safe to merge
+        # even across templates with different listing_headers (a manual
+        # .xlsx upload could in principle differ from the department
+        # defaults) since output_headers takes the union of every row's own
+        # keys, not just the base template's — no column, and so no C:
+        # value, is ever lost by merging. #INFO preamble rows are taken from
+        # whichever template contributed the first row; that's only really
+        # meaningful for a real downloaded .xlsx (the JSON department
+        # templates all share the exact same FIXED_INFO_ROWS anyway).
+        ordered_idxs = sorted(results_by_template)
+        combined_rows: list[dict] = []
+        combined_category_names: list[str] = []
+        combined_listing_headers: list[str] = []
+        for idx in ordered_idxs:
+            tr = results_by_template[idx]
+            combined_rows.extend(tr.rows)
+            for name in tr.category_names:
+                if name not in combined_category_names:
+                    combined_category_names.append(name)
+            for h in templates[idx].listing_headers:
+                if h not in combined_listing_headers:
+                    combined_listing_headers.append(h)
+        combined_template = ebay_template.EbayTemplate(
+            listing_headers=combined_listing_headers,
+            categories=[],
+            aspects={},
+            info_rows=templates[ordered_idxs[0]].info_rows,
+        )
+        combined_path = Path(output_path)
+        build.write_csv(combined_rows, combined_template, combined_path)
+        on_progress(
+            f"Wrote {len(combined_rows)} rows (from {len(ordered_idxs)} department templates) "
+            f"to one file: {combined_path}",
+            None,
+        )
+        template_results = [
+            TemplateResult(
+                template_path="combined",
+                output_path=str(combined_path),
+                category_names=combined_category_names,
+                rows=combined_rows,
+            )
+        ]
+    else:
+        template_results = []
+        for idx in sorted(results_by_template):
+            tr = results_by_template[idx]
+            build.write_csv(tr.rows, templates[idx], tr.output_path)
+            on_progress(f"Wrote {len(tr.rows)} rows to {tr.output_path}", None)
+            template_results.append(tr)
 
     on_progress(f"Done — {len(template_results)} output file(s) written.", 1.0)
 

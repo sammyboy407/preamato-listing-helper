@@ -136,6 +136,31 @@ SIZE_ALIASES = {
 }
 
 
+def _size_format_variants(raw: str) -> list[str]:
+    """Cheap, unambiguous rewrites of a raw size string worth trying before
+    giving up — never a scale conversion (that's a real judgment call, see
+    the EU->UK shoe tables below), just other ways the exact same size gets
+    written. Found needed 04.09.26: a Skirts size recorded as "03" failed to
+    match a valid "3"/"8"/etc, and a Knitwear size recorded as "UK 8" failed
+    to match a valid plain "8" — both are formatting differences, not
+    different sizes, but the plain fuzzy_match cutoff (0.85) isn't loose
+    enough to bridge either one reliably on its own (e.g. "03" vs "3" scores
+    well under it). Order doesn't matter for correctness since every variant
+    here is equivalent to the original by construction."""
+    variants = [raw]
+    # "UK 8", "eu38", "US 6" etc — a units prefix, not a different scale.
+    no_prefix = re.sub(r"^(uk|eu|us|it|fr)\s*", "", raw, flags=re.IGNORECASE).strip()
+    if no_prefix and no_prefix != raw:
+        variants.append(no_prefix)
+    # Leading zeros on an otherwise-plain number ("03" -> "3"): same size,
+    # just zero-padded — try it for the raw string and for the prefix-
+    # stripped one above, in case both applied (e.g. "UK 03").
+    for v in list(variants):
+        if re.fullmatch(r"0+\d+(\.\d+)?", v):
+            variants.append(v.lstrip("0") or "0")
+    return variants
+
+
 def match_size(raw: str | None, valid_values: list[str] | None) -> str | None:
     if not raw or not valid_values:
         return None
@@ -145,7 +170,11 @@ def match_size(raw: str | None, valid_values: list[str] | None) -> str | None:
         exact = fuzzy_match(alias, valid_values, cutoff=0.9)
         if exact:
             return exact
-    return fuzzy_match(raw, valid_values, cutoff=0.85)
+    for variant in _size_format_variants(raw):
+        matched = fuzzy_match(variant, valid_values, cutoff=0.85)
+        if matched:
+            return matched
+    return None
 
 
 # Footwear EU -> UK conversion. The master file's raw shoe "Size" is in EU

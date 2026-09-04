@@ -492,13 +492,39 @@ def generate_for_product(
                 # pipeline.py's existing per-product error handling skips
                 # this SKU (with the SKU named in the run's error summary)
                 # instead of silently producing an incomplete or blank
-                # listing. Fix at the source: add this item's size to the
-                # Pictures & Measurements file and re-run.
+                # listing.
+                #
+                # Two genuinely different causes end up here, and 04.09.26
+                # showed the old message conflated them into one misleading
+                # "no size in the file" line even when a size WAS present —
+                # it just didn't match any of this category's real eBay
+                # values (e.g. a raw "03" or "UK 8" against a picklist of
+                # letter sizes / even UK dress-size numbers only). Naming the
+                # raw value actually found, plus a sample of what eBay will
+                # accept here, makes each future case self-diagnosing
+                # without needing to dig through the code to find out which
+                # one it is.
+                raw_size = product.measurements.get("Size")
+                sample_values = ", ".join(spec.values[:12]) if spec.values else "(no closed list)"
+                more = f", +{len(spec.values) - 12} more" if spec.values and len(spec.values) > 12 else ""
+                if raw_size:
+                    detail = (
+                        f"the Measurements file has a size for this SKU ({raw_size!r}), but it "
+                        f"doesn't match any value eBay accepts for this category's {name!r} "
+                        f"field: {sample_values}{more}. This is a sizing-system mismatch (e.g. a "
+                        f"different scale than eBay's picklist for this category), not a missing "
+                        f"value — decide the correct eBay-accepted equivalent and either fix it in "
+                        f"the Measurements file, or extend the conversion logic in "
+                        f"aspect_matching.py to handle it."
+                    )
+                else:
+                    detail = (
+                        "no size in the Pictures & Measurements file for this SKU — Master File "
+                        "size is never used as a fallback (it isn't verified against the physical "
+                        "item). Add this SKU's size to the Measurements file and re-run."
+                    )
                 raise ValueError(
-                    f"no size in the Pictures & Measurements file for required "
-                    f"field {name!r} — Master File size is never used as a "
-                    f"fallback (it isn't verified against the physical item). "
-                    f"Add this SKU's size to the Measurements file and re-run."
+                    f"required field {name!r}: {detail}"
                 )
 
     # Country of Origin is always appended to the output header (see
