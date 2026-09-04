@@ -10,6 +10,7 @@ import anthropic
 from . import config
 
 _client = None
+_client_key = None  # the API key _client was built with, so a changed key rebuilds it
 
 # Occasionally a tool_use response comes back with a stray fragment of
 # tool-call markup leaked into a string field (e.g. "</description>\n
@@ -29,15 +30,27 @@ def _contains_leaked_markup(value) -> bool:
 
 
 def get_client() -> anthropic.Anthropic:
-    global _client
-    if _client is None:
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
-        if not api_key:
-            raise RuntimeError(
-                "ANTHROPIC_API_KEY is not set. Export it in your shell before running, e.g.\n"
-                "  export ANTHROPIC_API_KEY=sk-ant-...\n"
-            )
+    """Builds (or rebuilds) the Anthropic client from the current
+    ANTHROPIC_API_KEY. Deliberately re-checks the key on every call rather
+    than caching forever: app.py (the Streamlit UI) sets this env var fresh
+    from whatever key the user typed into the page, and the server process
+    it runs in is long-lived and shared across reruns/users - a naive
+    "build once" cache would silently keep using the FIRST key it ever saw
+    (or the first bad one, e.g. an invalid key entered before a valid one),
+    ignoring every later key someone pastes in for the rest of that
+    process's life. Only rebuilds when the key actually changes, so this
+    stays as cheap as the old always-cached version in the normal case
+    (repeated calls with the same key, e.g. the CLI's one export per run)."""
+    global _client, _client_key
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "ANTHROPIC_API_KEY is not set. Export it in your shell before running, e.g.\n"
+            "  export ANTHROPIC_API_KEY=sk-ant-...\n"
+        )
+    if _client is None or _client_key != api_key:
         _client = anthropic.Anthropic(api_key=api_key)
+        _client_key = api_key
     return _client
 
 
