@@ -4,10 +4,16 @@ are Required/Preferred/Optional, and which have a closed list of valid
 values eBay will actually accept.
 
 Field handling strategy, decided per aspect:
-  - Brand, Department, Country of Origin, Size-family (Size / UK Shoe Size /
-    Waist Size etc.), MPN: resolved deterministically in Python from data we
-    already have (aspect_matching.py) — these are lookups/normalization, not
-    judgment calls, so no AI call is spent on them.
+  - Brand, Department, Country of Origin, Type, Size-family (Size / UK Shoe
+    Size / Waist Size etc.), MPN: resolved deterministically in Python from
+    data we already have (aspect_matching.py) — these are lookups/
+    normalization, not judgment calls, so no AI call is spent on them.
+    Brand, Department (via Gender) and Type (via SubCat2) all read the
+    Master File — confirmed 04.09.26 that Colour/Material/Type/Gender/Brand
+    all originate there and are simply carried onto the Measurements file
+    at the Orbitvu photography stage, so Master is the correct source for
+    them (unlike Size, which is verified fresh at that stage — see
+    _resolve_size).
   - Physical measurement aspects (Pit to Pit / Length / Arm / Waist Laying
     Flat / Inside Leg, all "(inches)"): resolved deterministically straight
     from the Pictures & Measurements file's matching column — see
@@ -52,7 +58,7 @@ _CACHE_LOCK = threading.Lock()
 LARGE_LIST_THRESHOLD = 40
 
 # Aspects resolved deterministically in Python — never asked of the AI.
-DETERMINISTIC_ASPECTS = {"C:Brand", "C:Department", "C:Country of Origin", "C:MPN"}
+DETERMINISTIC_ASPECTS = {"C:Brand", "C:Department", "C:Country of Origin", "C:MPN", "C:Type"}
 
 # Physical garment measurements (inches) — always taken from the verified
 # Pictures & Measurements file, same trust reasoning as Size/Colour/Material
@@ -87,6 +93,16 @@ def _resolve_deterministic(name: str, product: Product, spec: ebay_template.Aspe
         return aspect_matching.match_country(m.get("Country of Origin"), spec.values)
     if name == "C:MPN":
         return "Does Not Apply"
+    if name == "C:Type":
+        # Confirmed 04.09.26: Type is Master File's SubCat2 column (like
+        # Colour/Material/Brand/Gender, entered at intake and carried onto
+        # the Measurements file at photography — Master is the source).
+        raw = m.get("SubCat2")
+        if not raw:
+            return None
+        if spec.values:
+            return aspect_matching.fuzzy_match(raw, spec.values, cutoff=0.5)
+        return str(raw).strip()
     return None
 
 

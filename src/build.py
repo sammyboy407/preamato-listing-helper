@@ -86,6 +86,8 @@ def build_description(
     colour_key = _primary_colour_key(category.category_id, template)
     colour = specifics.get(colour_key, "") if colour_key else ""
     style = specifics.get("C:Style", "Not Specified")
+    # Type: Master File's SubCat2 column — see content_generator._resolve_deterministic.
+    item_type = specifics.get("C:Type") or ""
     # Never fall back to the Master File's Size here either — see
     # content_generator._resolve_size for why (unverified against the
     # physical item; a real wrong-size/CS-issue risk if it leaked into the
@@ -111,24 +113,28 @@ def build_description(
         if value
     ]
 
-    department_line = ", ".join(
-        part for part in (
-            _gender_possessive(m.get("Gender")),
-            m.get("Category"),
-            m.get("Season"),
-        ) if part
-    )
+    department = _gender_possessive(m.get("Gender"))
+    # Season and Category (Tier1 Category on the Master File) broken out as
+    # their own explicit lines rather than folded into Department — Sammy
+    # asked for these called out separately for SEO (each becomes its own
+    # matchable keyword on the listing, e.g. a buyer searching "Autumn" or
+    # searching the top-level category name).
+    season = m.get("Season") or ""
+    tier1_category = m.get("Category") or ""
 
     # Trailing space on each spec line, matching the exact format requested.
     spec_lines = [
         f"Condition: {condition_line}",
         f"Brand: {brand}",
         f"Style: {style}",
+        f"Type: {item_type}",
         f"Colour: {colour}",
         f"Material: {ai_result.get('material_summary', 'Not Specified')}",
         f"Size: {size}",
         *measurement_lines,
-        f"Department: {department_line}",
+        f"Department: {department}",
+        f"Season: {season}",
+        f"Category: {tier1_category}",
         f"RRP: {_format_rrp(m.get('Rounded RRP'))}",
     ]
 
