@@ -86,7 +86,11 @@ def build_description(
     colour_key = _primary_colour_key(category.category_id, template)
     colour = specifics.get(colour_key, "") if colour_key else ""
     style = specifics.get("C:Style", "Not Specified")
-    size = specifics.get("C:Size") or specifics.get("C:UK Shoe Size") or meas.get("Size") or m.get("Size") or ""
+    # Never fall back to the Master File's Size here either — see
+    # content_generator._resolve_size for why (unverified against the
+    # physical item; a real wrong-size/CS-issue risk if it leaked into the
+    # customer-facing description).
+    size = specifics.get("C:Size") or specifics.get("C:UK Shoe Size") or meas.get("Size") or ""
 
     department_line = ", ".join(
         part for part in (

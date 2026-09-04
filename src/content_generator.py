@@ -72,9 +72,18 @@ def _resolve_deterministic(name: str, product: Product, spec: ebay_template.Aspe
 
 def _resolve_size(name: str, product: Product, spec: ebay_template.AspectSpec) -> str | None:
     m, meas = product.master, product.measurements
-    raw = meas.get("Size") or m.get("Size")
+    # Sizing NEVER falls back to the Master File. The Master File's Size
+    # column can be wrong — it's entered earlier in the process, before the
+    # item is ever physically handled. The Pictures & Measurements file is
+    # filled in when the item is actually photographed and measured, so
+    # it's the one point in the pipeline where size gets verified against
+    # the real physical item. Falling back to the Master File here would
+    # silently reintroduce exactly the wrong-size-shipped/customer-service/
+    # negative-feedback risk that the measuring step exists to prevent —
+    # confirmed as an explicit business rule 04.09.26.
+    raw = meas.get("Size")
     if name == "C:UK Shoe Size":
-        # Master file's raw shoe "Size" is in EU sizing, not UK — see
+        # Measurements file's raw shoe "Size" is in EU sizing, not UK — see
         # aspect_matching.EU_TO_UK_WOMENS_SHOE_SIZE / _MENS_SHOE_SIZE.
         return aspect_matching.match_shoe_size_uk(raw, spec.values, m.get("Gender"))
     if name == "C:EU Shoe Size":
@@ -138,7 +147,12 @@ def _product_brief(product: Product) -> str:
         f"Category / SubCategory: {m.get('Category')} / {m.get('SubCat2')}",
         f"Gender: {m.get('Gender')}",
         f"Colour (raw, may not match eBay's exact wording): {meas.get('Colour') or m.get('Colour')}",
-        f"Size (raw): {meas.get('Size') or m.get('Size')}",
+        # Measurements file only — see _resolve_size for why the Master
+        # File's Size is never used, even as a fallback, for anything that
+        # ends up in a listing (title, description, or item specifics).
+        f"Size (raw, from the verified Pictures & Measurements file — "
+        f"'(not measured)' means treat size as unknown, do not guess one "
+        f"from the title or elsewhere): {meas.get('Size') or '(not measured)'}",
         f"Composition/Material (raw, may be messy): {meas.get('Material') or m.get('Composition')}",
         f"Country of Origin (raw): {m.get('Country of Origin')}",
         f"Internal quality grade: {m.get('Quality')}",
@@ -332,6 +346,22 @@ def generate_for_product(
             value = _resolve_size(name, product, spec)
             if value:
                 specifics[name] = value
+            elif spec.level == "REQUIRED":
+                # Never ship a listing with a guessed or missing size for a
+                # Required size field — that's exactly the wrong-size-
+                # shipped/customer-service/negative-feedback risk the
+                # Measurements step exists to prevent. Raising here means
+                # pipeline.py's existing per-product error handling skips
+                # this SKU (with the SKU named in the run's error summary)
+                # instead of silently producing an incomplete or blank
+                # listing. Fix at the source: add this item's size to the
+                # Pictures & Measurements file and re-run.
+                raise ValueError(
+                    f"no size in the Pictures & Measurements file for required "
+                    f"field {name!r} — Master File size is never used as a "
+                    f"fallback (it isn't verified against the physical item). "
+                    f"Add this SKU's size to the Measurements file and re-run."
+                )
 
     result["item_specifics"] = specifics
 
