@@ -74,6 +74,14 @@ MEASUREMENT_ASPECTS = {
     "C:Inside Leg (inches)",
 }
 
+# Aspects eBay allows multiple selected values for (entered pipe-separated in
+# the bulk CSV, e.g. "Casual|Workwear|Travel"). Sammy asked specifically for
+# Occasion 04.09.26: pick every occasion that genuinely fits, not just one,
+# since buyers filter search results by it. Only Occasion is in this set for
+# now — other eBay aspects that also support multiple values (Features,
+# Character, Theme, etc.) aren't confirmed as wanted here yet.
+MULTI_SELECT_ASPECTS = {"C:Occasion"}
+
 
 def _is_size_aspect(name: str) -> bool:
     return "Size" in name and name not in DETERMINISTIC_ASPECTS
@@ -138,17 +146,25 @@ def _resolve_size(name: str, product: Product, spec: ebay_template.AspectSpec) -
 
 def classify_aspects(
     category_id: str, template: ebay_template.EbayTemplate
-) -> tuple[dict[str, ebay_template.AspectSpec], dict[str, ebay_template.AspectSpec], dict[str, ebay_template.AspectSpec]]:
-    """Splits a category's aspects into (enum_specs, hybrid_specs, skipped).
-    enum_specs: small closed lists -> strict schema enum.
+) -> tuple[
+    dict[str, ebay_template.AspectSpec],
+    dict[str, ebay_template.AspectSpec],
+    dict[str, ebay_template.AspectSpec],
+    dict[str, ebay_template.AspectSpec],
+]:
+    """Splits a category's aspects into (enum_specs, hybrid_specs, multi_specs, skipped).
+    enum_specs: small closed lists -> strict schema enum, single value.
     hybrid_specs: large closed list but Required, or any colour-named aspect
         -> AI free-text guess + Python fuzzy-match against the real list.
+    multi_specs: aspects eBay allows multiple selected values for (see
+        MULTI_SELECT_ASPECTS) -> AI picks every value that applies, not just one.
     (Deterministic and free-text-blank aspects are handled outside this;
     skipped ones are simply not returned at all by the caller.)
     """
     aspects = template.aspects.get(str(category_id), {})
     enum_specs: dict[str, ebay_template.AspectSpec] = {}
     hybrid_specs: dict[str, ebay_template.AspectSpec] = {}
+    multi_specs: dict[str, ebay_template.AspectSpec] = {}
     skipped: dict[str, ebay_template.AspectSpec] = {}
 
     for name, spec in aspects.items():
@@ -156,6 +172,9 @@ def classify_aspects(
             continue
         if spec.values is None:
             skipped[name] = spec  # free text, not inferable — left blank
+            continue
+        if name in MULTI_SELECT_ASPECTS:
+            multi_specs[name] = spec
             continue
         if _is_colour_aspect(name):
             hybrid_specs[name] = spec
@@ -167,7 +186,7 @@ def classify_aspects(
         else:
             skipped[name] = spec
 
-    return enum_specs, hybrid_specs, skipped
+    return enum_specs, hybrid_specs, multi_specs, skipped
 
 
 def _condition_rubric(category: ebay_template.CategorySpec) -> str:
@@ -244,6 +263,7 @@ def _build_schema_and_system(
     category: ebay_template.CategorySpec,
     enum_specs: dict[str, ebay_template.AspectSpec],
     hybrid_specs: dict[str, ebay_template.AspectSpec],
+    multi_specs: dict[str, ebay_template.AspectSpec],
     product_text: str,
 ) -> tuple[dict, str]:
     item_specific_props = {}
@@ -254,6 +274,21 @@ def _build_schema_and_system(
         item_specific_props[name] = {"type": "string", "enum": spec.values}
         item_specific_required.append(name)
         field_notes.append(f"  {name} ({spec.level}): choose exactly one from its enum list")
+
+    for name, spec in multi_specs.items():
+        item_specific_props[name] = {
+            "type": "array",
+            "items": {"type": "string", "enum": spec.values},
+            "minItems": 1,
+        }
+        item_specific_required.append(name)
+        field_notes.append(
+            f"  {name} ({spec.level}): eBay allows MULTIPLE values here — return every one "
+            f"from its enum list that genuinely fits this item, not just the single best match. "
+            f"Buyers filter listings by this field, so under-selecting loses search visibility, "
+            f"but only include values that are actually true of the item — don't pad the list "
+            f"with ones that don't apply. Full list: {', '.join(spec.values)}"
+        )
 
     for name, spec in hybrid_specs.items():
         item_specific_props[name] = {"type": "string"}
@@ -348,9 +383,9 @@ def generate_for_product(
             if cache_key in cache:
                 return cache[cache_key]
 
-    enum_specs, hybrid_specs, _skipped = classify_aspects(category.category_id, template)
+    enum_specs, hybrid_specs, multi_specs, _skipped = classify_aspects(category.category_id, template)
     product_text = _product_brief(product)
-    schema, system = _build_schema_and_system(category, enum_specs, hybrid_specs, product_text)
+    schema, system = _build_schema_and_system(category, enum_specs, hybrid_specs, multi_specs, product_text)
 
     result = ai_client.call_structured(
         system=system,
@@ -358,6 +393,21 @@ def generate_for_product(
         tool_name="submit_listing_content",
         input_schema=schema,
     )
+
+    # Brand is always upper case in the title (Sammy's request, 04.09.26) —
+    # enforced here rather than left to the AI, since prompt instructions
+    # aren't a guarantee. If the AI's title already contains the brand name
+    # (it's told to front-load it — see the system prompt above), just fix
+    # its casing; if it somehow left it out entirely, prepend it rather than
+    # silently shipping a title with no brand at all.
+    brand_raw = str(product.master.get("Brand") or "").strip()
+    title = result.get("title", "")
+    if brand_raw:
+        if re.search(re.escape(brand_raw), title, flags=re.IGNORECASE):
+            title = re.sub(re.escape(brand_raw), brand_raw.upper(), title, count=1, flags=re.IGNORECASE)
+        else:
+            title = f"{brand_raw.upper()} {title}".strip()
+        result["title"] = title
 
     if len(result.get("title", "")) > 80:
         result["title"] = result["title"][:80].rstrip()
@@ -390,6 +440,27 @@ def generate_for_product(
         # else: leave the AI's free-text guess as-is (best effort; not in the
         # sampled list shown to it doesn't necessarily mean it's wrong).
 
+    # Validate the multi-select fields (e.g. Occasion) — the AI returns a
+    # JSON array; keep only values that are literally in the real closed
+    # list (fuzzy-matching each one, same tolerance as a single enum field),
+    # then join with "|" since that's eBay's bulk-CSV convention for a
+    # multi-value aspect cell. Guarantee at least one value survives (a
+    # multi-select Required/Optional field with zero values is the same
+    # "blank Required field" risk as the shoe-size bug) by falling back to
+    # the closest single match if every guess failed to match anything.
+    for name, spec in multi_specs.items():
+        guesses = specifics.get(name)
+        if not isinstance(guesses, list):
+            guesses = [guesses] if guesses else []
+        matched = []
+        for guess in guesses:
+            m2 = aspect_matching.fuzzy_match(guess, spec.values, cutoff=0.5)
+            if m2 and m2 not in matched:
+                matched.append(m2)
+        if not matched:
+            matched = [spec.values[0]]
+        specifics[name] = "|".join(matched)
+
     # Layer in the deterministic fields.
     aspects = template.aspects.get(str(category.category_id), {})
     for name, spec in aspects.items():
@@ -421,6 +492,20 @@ def generate_for_product(
                     f"fallback (it isn't verified against the physical item). "
                     f"Add this SKU's size to the Measurements file and re-run."
                 )
+
+    # Country of Origin is always appended to the output header (see
+    # build.EXTRA_COLUMNS) regardless of whether this category's own eBay
+    # Aspects happen to define it — Sammy asked (04.09.26) for it to always
+    # be filled in, not just present as an empty column. The deterministic
+    # loop above already resolves it whenever the category's Aspects define
+    # it with a usable closed list to fuzzy-match against; this is the
+    # backstop for every other case (no Country of Origin aspect for this
+    # category at all, or its closed list is empty/too sparse to match).
+    if not specifics.get("C:Country of Origin"):
+        raw_country = str(product.master.get("Country of Origin") or "").strip()
+        if raw_country:
+            alias = aspect_matching.COUNTRY_ALIASES.get(raw_country.lower())
+            specifics["C:Country of Origin"] = alias or raw_country
 
     result["item_specifics"] = specifics
 
