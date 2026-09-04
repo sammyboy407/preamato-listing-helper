@@ -8,6 +8,12 @@ Field handling strategy, decided per aspect:
     Waist Size etc.), MPN: resolved deterministically in Python from data we
     already have (aspect_matching.py) — these are lookups/normalization, not
     judgment calls, so no AI call is spent on them.
+  - Physical measurement aspects (Pit to Pit / Length / Arm / Waist Laying
+    Flat / Inside Leg, all "(inches)"): resolved deterministically straight
+    from the Pictures & Measurements file's matching column — see
+    MEASUREMENT_ASPECTS. Never AI-guessed, never sourced from the Master
+    File (same reasoning as Size: these are only trustworthy once the item
+    has actually been measured).
   - Colour-family aspects (any name containing "Colour"): AI proposes a
     value (free text, informed by a sample of valid options), then Python
     fuzzy-matches it against the real closed list. Handles huge lists like
@@ -48,6 +54,20 @@ LARGE_LIST_THRESHOLD = 40
 # Aspects resolved deterministically in Python — never asked of the AI.
 DETERMINISTIC_ASPECTS = {"C:Brand", "C:Department", "C:Country of Origin", "C:MPN"}
 
+# Physical garment measurements (inches) — always taken from the verified
+# Pictures & Measurements file, same trust reasoning as Size/Colour/Material
+# (see _resolve_size): these are measured against the real physical item, so
+# they're never AI-guessed and never fall back to the Master File (which
+# doesn't carry these columns at all). Aspect name == "C:" + the
+# measurements file's own column name.
+MEASUREMENT_ASPECTS = {
+    "C:Pit to Pit (inches)",
+    "C:Length (inches)",
+    "C:Arm (inches)",
+    "C:Waist Laying Flat (inches)",
+    "C:Inside Leg (inches)",
+}
+
 
 def _is_size_aspect(name: str) -> bool:
     return "Size" in name and name not in DETERMINISTIC_ASPECTS
@@ -68,6 +88,15 @@ def _resolve_deterministic(name: str, product: Product, spec: ebay_template.Aspe
     if name == "C:MPN":
         return "Does Not Apply"
     return None
+
+
+def _resolve_measurement(name: str, product: Product) -> str | None:
+    """Pit to Pit / Length / Arm / Waist Laying Flat / Inside Leg — read
+    straight off the measurements file's matching column, verified-source
+    only (see MEASUREMENT_ASPECTS)."""
+    raw = product.measurements.get(name[len("C:"):])
+    raw = str(raw).strip() if raw is not None else ""
+    return raw or None
 
 
 def _resolve_size(name: str, product: Product, spec: ebay_template.AspectSpec) -> str | None:
@@ -107,7 +136,7 @@ def classify_aspects(
     skipped: dict[str, ebay_template.AspectSpec] = {}
 
     for name, spec in aspects.items():
-        if name in DETERMINISTIC_ASPECTS or _is_size_aspect(name):
+        if name in DETERMINISTIC_ASPECTS or name in MEASUREMENT_ASPECTS or _is_size_aspect(name):
             continue
         if spec.values is None:
             skipped[name] = spec  # free text, not inferable — left blank
@@ -146,14 +175,23 @@ def _product_brief(product: Product) -> str:
         f"Internal title: {m.get('Clean Title Description')}",
         f"Category / SubCategory: {m.get('Category')} / {m.get('SubCat2')}",
         f"Gender: {m.get('Gender')}",
-        f"Colour (raw, may not match eBay's exact wording): {meas.get('Colour') or m.get('Colour')}",
-        # Measurements file only — see _resolve_size for why the Master
-        # File's Size is never used, even as a fallback, for anything that
-        # ends up in a listing (title, description, or item specifics).
+        # Colour, Size and Material below are Measurements-file only — see
+        # _resolve_size for why the Master File is never used, even as a
+        # fallback, for anything that ends up in a listing (title,
+        # description, or item specifics): the Master File is filled in
+        # before the item is ever physically handled, the Measurements file
+        # is filled in when it's actually photographed and inspected.
+        f"Colour (raw, may not match eBay's exact wording, from the "
+        f"verified Pictures & Measurements file — '(not recorded)' means "
+        f"treat colour as unknown, do not guess one from the title or "
+        f"elsewhere): {meas.get('Colour') or '(not recorded)'}",
         f"Size (raw, from the verified Pictures & Measurements file — "
         f"'(not measured)' means treat size as unknown, do not guess one "
         f"from the title or elsewhere): {meas.get('Size') or '(not measured)'}",
-        f"Composition/Material (raw, may be messy): {meas.get('Material') or m.get('Composition')}",
+        f"Composition/Material (raw, may be messy, from the verified "
+        f"Pictures & Measurements file — '(not recorded)' means treat "
+        f"material as unknown, do not guess one from the title or "
+        f"elsewhere): {meas.get('Material') or '(not recorded)'}",
         f"Country of Origin (raw): {m.get('Country of Origin')}",
         f"Internal quality grade: {m.get('Quality')}",
         f"Condition notes (from inspection): {meas.get('Description') or '(none given)'}",
@@ -330,7 +368,7 @@ def generate_for_product(
         elif _is_colour_aspect(name):
             # Last resort for a colour field: fall back to the item's own
             # raw colour text rather than an unvalidated AI guess.
-            raw_colour = product.measurements.get("Colour") or product.master.get("Colour")
+            raw_colour = product.measurements.get("Colour")
             specifics[name] = aspect_matching.fuzzy_match(raw_colour, spec.values, cutoff=0.4) or (guess or "")
         # else: leave the AI's free-text guess as-is (best effort; not in the
         # sampled list shown to it doesn't necessarily mean it's wrong).
@@ -340,6 +378,10 @@ def generate_for_product(
     for name, spec in aspects.items():
         if name in DETERMINISTIC_ASPECTS:
             value = _resolve_deterministic(name, product, spec)
+            if value:
+                specifics[name] = value
+        elif name in MEASUREMENT_ASPECTS:
+            value = _resolve_measurement(name, product)
             if value:
                 specifics[name] = value
         elif _is_size_aspect(name):

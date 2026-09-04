@@ -92,6 +92,25 @@ def build_description(
     # customer-facing description).
     size = specifics.get("C:Size") or specifics.get("C:UK Shoe Size") or meas.get("Size") or ""
 
+    # Physical measurements (inches) — verified Pictures & Measurements file
+    # only, same as Size above (see content_generator.MEASUREMENT_ASPECTS).
+    # Read from item_specifics first (already resolved there) falling back
+    # to meas directly for a category where the aspect itself isn't defined
+    # — either way the source is the same file, never the Master File.
+    measurement_fields = [
+        ("Pit to Pit", "C:Pit to Pit (inches)", "Pit to Pit (inches)"),
+        ("Length", "C:Length (inches)", "Length (inches)"),
+        ("Arm", "C:Arm (inches)", "Arm (inches)"),
+        ("Waist (laying flat)", "C:Waist Laying Flat (inches)", "Waist Laying Flat (inches)"),
+        ("Inside Leg", "C:Inside Leg (inches)", "Inside Leg (inches)"),
+    ]
+    measurement_lines = [
+        f"{label} (inches): {value}"
+        for label, spec_key, meas_key in measurement_fields
+        for value in [specifics.get(spec_key) or meas.get(meas_key) or ""]
+        if value
+    ]
+
     department_line = ", ".join(
         part for part in (
             _gender_possessive(m.get("Gender")),
@@ -108,6 +127,7 @@ def build_description(
         f"Colour: {colour}",
         f"Material: {ai_result.get('material_summary', 'Not Specified')}",
         f"Size: {size}",
+        *measurement_lines,
         f"Department: {department_line}",
         f"RRP: {_format_rrp(m.get('Rounded RRP'))}",
     ]
