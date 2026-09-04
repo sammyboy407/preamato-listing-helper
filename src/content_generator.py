@@ -175,23 +175,21 @@ def _product_brief(product: Product) -> str:
         f"Internal title: {m.get('Clean Title Description')}",
         f"Category / SubCategory: {m.get('Category')} / {m.get('SubCat2')}",
         f"Gender: {m.get('Gender')}",
-        # Colour, Size and Material below are Measurements-file only — see
-        # _resolve_size for why the Master File is never used, even as a
-        # fallback, for anything that ends up in a listing (title,
-        # description, or item specifics): the Master File is filled in
-        # before the item is ever physically handled, the Measurements file
-        # is filled in when it's actually photographed and inspected.
-        f"Colour (raw, may not match eBay's exact wording, from the "
-        f"verified Pictures & Measurements file — '(not recorded)' means "
-        f"treat colour as unknown, do not guess one from the title or "
-        f"elsewhere): {meas.get('Colour') or '(not recorded)'}",
+        # Colour and Material: sourced from the Master File — confirmed
+        # 04.09.26 that these are entered at intake, then carried onto the
+        # Measurements file at the Orbitvu photography stage (so the two
+        # should always agree; Master is the origin). Measurements is kept
+        # as a fallback only for a row where Master happens to be blank.
+        # Size, by contrast, stays Measurements-only — see _resolve_size —
+        # since size is the one field actually verified against the
+        # physical item at that stage, not just carried over.
+        f"Colour (raw, may not match eBay's exact wording): "
+        f"{m.get('Colour') or meas.get('Colour') or '(not recorded)'}",
         f"Size (raw, from the verified Pictures & Measurements file — "
         f"'(not measured)' means treat size as unknown, do not guess one "
         f"from the title or elsewhere): {meas.get('Size') or '(not measured)'}",
-        f"Composition/Material (raw, may be messy, from the verified "
-        f"Pictures & Measurements file — '(not recorded)' means treat "
-        f"material as unknown, do not guess one from the title or "
-        f"elsewhere): {meas.get('Material') or '(not recorded)'}",
+        f"Composition/Material (raw, may be messy): "
+        f"{m.get('Composition') or meas.get('Material') or '(not recorded)'}",
         f"Country of Origin (raw): {m.get('Country of Origin')}",
         f"Internal quality grade: {m.get('Quality')}",
         f"Condition notes (from inspection): {meas.get('Description') or '(none given)'}",
@@ -367,8 +365,11 @@ def generate_for_product(
             specifics[name] = matched
         elif _is_colour_aspect(name):
             # Last resort for a colour field: fall back to the item's own
-            # raw colour text rather than an unvalidated AI guess.
-            raw_colour = product.measurements.get("Colour")
+            # raw colour text rather than an unvalidated AI guess. Master
+            # File first — Colour is entered at intake and carried onto the
+            # Measurements file at photography, so Master is the source of
+            # truth here (unlike Size — see _resolve_size).
+            raw_colour = product.master.get("Colour") or product.measurements.get("Colour")
             specifics[name] = aspect_matching.fuzzy_match(raw_colour, spec.values, cutoff=0.4) or (guess or "")
         # else: leave the AI's free-text guess as-is (best effort; not in the
         # sampled list shown to it doesn't necessarily mean it's wrong).
