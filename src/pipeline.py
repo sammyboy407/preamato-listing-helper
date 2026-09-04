@@ -23,6 +23,24 @@ from . import brand_blurb, build, builtin_catalog, category_mapping, config, con
 
 ProgressFn = Callable[[str, float | None], None]
 
+# The API-generated department templates (see
+# scripts/fetch_ebay_category_aspects.py) — one per department, covering
+# menswear/womenswear clothing, shoes and accessories, jewellery & watches,
+# homeware, and kidswear, sourced straight from eBay's own Taxonomy and
+# Metadata APIs rather than a manually downloaded Seller Hub .xlsx. Used
+# automatically below when no template is manually uploaded/passed, since
+# this now covers the account's real catalog far more completely than
+# builtin_catalog.py's single bundled-export fallback did. That fallback is
+# kept as the final safety net for a fresh checkout before anyone has run
+# the fetch script (data/templates/ won't exist yet).
+DEFAULT_TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "data" / "templates"
+
+
+def _default_department_templates() -> list[Path]:
+    if not DEFAULT_TEMPLATES_DIR.is_dir():
+        return []
+    return sorted(DEFAULT_TEMPLATES_DIR.glob("*.json"))
+
 
 def _noop(msg: str, frac: float | None = None) -> None:
     pass
@@ -73,13 +91,28 @@ def run(
     Gender) doesn't match any category in ANY of the given templates.
 
     template_path is optional — pass None/[] to skip uploading a template
-    entirely and use the built-in category catalog instead (see
-    builtin_catalog.py), built from a bundled export of this account's own
-    real listings. An uploaded template is still stricter/more accurate
-    (real Required/Preferred/Optional flags and closed value lists) where
-    it covers a category, so pass one when you have it."""
+    manually and fall back automatically to data/templates/*.json, the
+    API-generated department templates (menswear/womenswear clothing, shoes
+    and accessories, jewellery & watches, homeware, kidswear — see
+    _default_department_templates above and
+    scripts/fetch_ebay_category_aspects.py), which by now cover the real
+    catalog far more completely than a single manually uploaded .xlsx ever
+    did. If that directory doesn't exist yet (a fresh checkout before
+    anyone has run the fetch script), falls back further to the built-in
+    category catalog (see builtin_catalog.py), built from a bundled export
+    of this account's own real listings. A manually uploaded template still
+    takes priority and is still stricter/more accurate (real Required/
+    Preferred/Optional flags and closed value lists) where it covers a
+    category, so pass one when you specifically want to override the
+    department defaults for a category."""
     Path(cache_dir).mkdir(parents=True, exist_ok=True)
     template_paths = template_path if isinstance(template_path, list) else ([template_path] if template_path else [])
+    used_default_departments = False
+    if not template_paths:
+        default_templates = _default_department_templates()
+        if default_templates:
+            template_paths = default_templates
+            used_default_departments = True
 
     on_progress("Loading source files...", 0.0)
     products = data_loader.load_products(master_path, measurements_path)
@@ -93,7 +126,8 @@ def run(
     on_progress(f"{len(products)} products to process.", 0.05)
 
     if template_paths:
-        on_progress(f"Loading {len(template_paths)} eBay template(s)...", 0.07)
+        label = "department templates" if used_default_departments else "eBay template(s)"
+        on_progress(f"Loading {len(template_paths)} {label}...", 0.07)
         templates = [ebay_template.load_template(p) for p in template_paths]
         for p, t in zip(template_paths, templates):
             on_progress(f"  {Path(p).name}: covers {len(t.categories)} categories.", None)

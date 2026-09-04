@@ -134,21 +134,23 @@ with col1:
         help="Multiple files are merged — e.g. separate exports per supplier batch.",
     )
     template_files = st.file_uploader(
-        "eBay category listing template(s) (.xlsx) — optional",
+        "eBay category listing template(s) (.xlsx) — optional override",
         type=["xlsx"],
         accept_multiple_files=True,
         help=(
-            "Optional. The actual template eBay generates from Seller Hub > Create listings "
-            "in bulk for the categories you select there — more accurate than the built-in "
-            "catalog where it covers a category (official Required/Preferred/Optional flags "
-            "and closed value lists). Leave empty to use the built-in category catalog "
-            "instead (this account's own real listings). Upload several to cover your whole "
-            "catalog across every category you have a template for — one output file is "
-            "produced per template (or the built-in catalog) that ends up with matched products."
+            "Optional. By default every run already covers the full catalog automatically "
+            "(menswear/womenswear clothing, shoes and accessories, jewellery & watches, "
+            "homeware, and kidswear — see data/templates/, generated straight from eBay's "
+            "own API). Only upload a template here if you specifically want to override one "
+            "or more of those departments with a real .xlsx downloaded by hand from Seller "
+            "Hub > Create listings in bulk for a particular batch — an uploaded template "
+            "takes priority over the matching department default where its categories "
+            "overlap. One output file is produced per template (department default or "
+            "manually uploaded) that ends up with matched products."
         ),
     )
     if not template_files:
-        st.caption("No template uploaded — will use the built-in category catalog.")
+        st.caption("No manual template uploaded — using the full department template set (menswear/womenswear clothing, shoes, accessories, jewellery & watches, homeware, kidswear).")
 with col2:
     measurements_files = st.file_uploader(
         "Pictures & Measurements (.csv)", type=["csv"], accept_multiple_files=True,
@@ -205,7 +207,20 @@ if schedule_enabled:
         )
         if not schedule_supported:
             st.caption("Heads up: none of your uploaded template(s) have a Schedule Time column — listings will start immediately instead.")
-    # else: no template uploaded, so the built-in catalog will be used, which always has a Schedule Time column.
+    else:
+        # No manual upload — the department templates (or, failing that, the
+        # built-in catalog) are used instead. Neither currently has a
+        # Schedule Time column (see FIXED_LISTING_HEADERS_PREFIX in
+        # scripts/fetch_ebay_category_aspects.py), so be upfront about it
+        # rather than silently going quiet, matching the manual-upload path
+        # above.
+        default_paths = pipeline._default_department_templates()
+        schedule_supported = (
+            any(ebay_template.supports_schedule_time(p) for p in default_paths)
+            if default_paths else True  # falls back to the built-in catalog, which always has it
+        )
+        if not schedule_supported:
+            st.caption("Heads up: the department templates don't have a Schedule Time column — listings will start immediately instead.")
 
 run_clicked = st.button("Generate eBay upload file", type="primary", use_container_width=True)
 
