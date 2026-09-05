@@ -259,16 +259,51 @@ US_TO_UK_MENS_SHOE_SIZE = {
 # refusing them outright.
 BARE_NUMBER_SHOE_SYSTEM = "UK"
 
+# Brands where a bare number means US rather than UK. Consulted ONLY for a
+# number with no marker on it; an explicit "UK 6" or "EU 42" always wins,
+# whatever the brand.
+#
+# Sammy spotted this on 05.09.26 in the first 295-row batch. Blackstock &
+# Weber had three pairs recorded three different ways: "US10", "uk 6", and a
+# bare "10". The US10 and the bare 10 are the same Penny Pony Loafer at the
+# same RRP, and they went out listed half a size apart (UK 9.5 and UK 10),
+# because the bare one fell under the UK default.
+#
+# Add a brand here only on evidence, not on nationality. The test that found
+# this one: does the brand have explicitly US-marked sizes elsewhere in the
+# same intake, and no UK-marked ones? GH Bass looks American but its other
+# 19 items are in EU sizes that line up with the UK reading, so it stays off
+# this list. On Running and Salomon were confirmed as UK by Sammy directly.
+US_SIZED_BRANDS = {
+    "BLACKSTOCK & WEBER",
+    "VISVIM",
+}
+
+
+def _normalise_brand(brand) -> str:
+    return " ".join(str(brand or "").strip().upper().split())
+
+
+def bare_number_system(brand=None) -> str | None:
+    """Which scale an unmarked number means, for this brand.
+
+    The brand rule exists because the intake data is inconsistent, not
+    because the brands are. The real fix is recording 'US 10' at intake, at
+    which point this list stops mattering."""
+    if _normalise_brand(brand) in US_SIZED_BRANDS:
+        return "US"
+    return BARE_NUMBER_SHOE_SYSTEM
+
 _SHOE_SIZE_RE = re.compile(r"^\s*(uk|eu|eur|us|usa|it|fr|jp)?\s*[:\-]?\s*(\d+(?:\.\d+)?)\s*$", re.IGNORECASE)
 
 
-def parse_shoe_size(raw: str | None) -> tuple[str | None, str | None]:
+def parse_shoe_size(raw: str | None, brand=None) -> tuple[str | None, str | None]:
     """Splits a raw shoe size into (system, number) — ("EU", "45"),
     ("UK", "7"), etc. A bare number is EU if it's in EU range (>= 33 —
     no UK/US adult size gets that high, no EU size is lower); a bare number
-    below that is read as BARE_NUMBER_SHOE_SYSTEM (see there — currently UK,
-    Sammy's call, since her stock is UK-sourced). Use is_assumed_shoe_system
-    to tell an assumed reading apart from an explicit one.
+    below that is read as bare_number_system(brand) — UK by default, US for
+    the brands in US_SIZED_BRANDS. Use is_assumed_shoe_system to tell an
+    assumed reading apart from an explicit one.
     The number is canonicalised ("40.0" -> "40")."""
     if raw is None:
         return None, None
@@ -280,7 +315,7 @@ def parse_shoe_size(raw: str | None) -> tuple[str | None, str | None]:
         return None, None
     if prefix:
         return _normalise_size_marker(prefix), number
-    return ("EU" if float(number) >= 33 else BARE_NUMBER_SHOE_SYSTEM), number
+    return ("EU" if float(number) >= 33 else bare_number_system(brand)), number
 
 
 def _normalise_size_marker(prefix: str) -> str:
@@ -303,7 +338,7 @@ def _normalise_size_marker(prefix: str) -> str:
 _RANGE_SPLIT_RE = re.compile(r"\s*[-/\u2013]\s*")
 
 
-def parse_shoe_size_range(raw: str | None) -> tuple[str | None, str | None, str | None]:
+def parse_shoe_size_range(raw: str | None, brand=None) -> tuple[str | None, str | None, str | None]:
     """Splits "2.5-3.5" into ("UK", "2.5", "3.5") — system, low, high — using
     exactly the same system rules as parse_shoe_size. Returns (None, None,
     None) for anything that isn't a two-ended range of plain numbers, which
@@ -339,7 +374,7 @@ def parse_shoe_size_range(raw: str | None) -> tuple[str | None, str | None, str 
         # Neither end marked: both fall under the bare-number rule, and both
         # have to land in the same system ("30-40" is not a range, it's a
         # typo spanning two scales).
-        systems = {parse_shoe_size(n)[0] for n in numbers}
+        systems = {parse_shoe_size(n, brand)[0] for n in numbers}
         if len(systems) != 1:
             return None, None, None
         system = systems.pop()
@@ -361,7 +396,8 @@ def _resolve_range_end(number, system, valid_values, gender):
     return fuzzy_match(converted, valid_values) if converted else None
 
 
-def match_shoe_size_uk(raw: str | None, valid_values: list[str] | None, gender: str | None) -> str | None:
+def match_shoe_size_uk(raw: str | None, valid_values: list[str] | None, gender: str | None,
+                       brand=None) -> str | None:
     """Resolves the UK Shoe Size aspect from a raw Measurements-file size.
     An explicit "UK x" is matched exactly; an EU size (explicit "EU x", or a
     bare number in EU range) is converted via the gender-appropriate table
@@ -371,7 +407,7 @@ def match_shoe_size_uk(raw: str | None, valid_values: list[str] | None, gender: 
     Required field is never filled with a guess."""
     if not raw or not valid_values:
         return None
-    system, number = parse_shoe_size(raw)
+    system, number = parse_shoe_size(raw, brand)
     if system == "UK":
         return fuzzy_match(number, valid_values)
     if system == "EU":
@@ -398,7 +434,7 @@ def match_shoe_size_uk(raw: str | None, valid_values: list[str] | None, gender: 
         return fuzzy_match(uk_equivalent, valid_values) if uk_equivalent else None
 
     # Not a single size — try it as a range ("2.5-3.5").
-    range_system, low, high = parse_shoe_size_range(raw)
+    range_system, low, high = parse_shoe_size_range(raw, brand)
     if range_system:
         low_uk = _resolve_range_end(low, range_system, valid_values, gender)
         high_uk = _resolve_range_end(high, range_system, valid_values, gender)
@@ -407,13 +443,19 @@ def match_shoe_size_uk(raw: str | None, valid_values: list[str] | None, gender: 
     return None
 
 
-def is_assumed_shoe_system(raw: str | None) -> bool:
-    """True when the size carries no system marker and was read as
-    BARE_NUMBER_SHOE_SYSTEM by assumption rather than because the value said
-    so. Used to flag those rows for spot checking — a bare "9" read as UK 9
-    is right for UK-sourced stock and half a size out if the pair was
-    actually marked US."""
-    if raw is None or BARE_NUMBER_SHOE_SYSTEM is None:
+def assumed_shoe_system(raw: str | None, brand=None) -> str | None:
+    """The scale a size was read as BY ASSUMPTION, or None if the value said
+    so itself. Lets the checks report name what was assumed rather than just
+    that something was."""
+    return bare_number_system(brand) if is_assumed_shoe_system(raw, brand) else None
+
+
+def is_assumed_shoe_system(raw: str | None, brand=None) -> bool:
+    """True when the size carries no system marker and was read by assumption
+    rather than because the value said so. Used to flag those rows for spot
+    checking — a bare "9" read as UK 9 is right for UK-sourced stock and half
+    a size out if the pair was actually marked US."""
+    if raw is None or bare_number_system(brand) is None:
         return False
     text = str(raw)
     m = _SHOE_SIZE_RE.match(text)
@@ -455,16 +497,16 @@ def _us_to_uk_table(gender):
     return None
 
 
-def match_shoe_size_eu(raw: str | None, valid_values: list[str] | None) -> str | None:
+def match_shoe_size_eu(raw: str | None, valid_values: list[str] | None, brand=None) -> str | None:
     """Resolves the EU Shoe Size aspect: only from a raw size that actually
     IS an EU size (explicit "EU x" or a bare number in EU range) — a "UK 7"
     is never written into an EU field."""
     if not raw or not valid_values:
         return None
-    system, number = parse_shoe_size(raw)
+    system, number = parse_shoe_size(raw, brand)
     if system == "EU":
         return fuzzy_match(number, valid_values)
-    range_system, low, high = parse_shoe_size_range(raw)
+    range_system, low, high = parse_shoe_size_range(raw, brand)
     if range_system == "EU":
         low_eu, high_eu = fuzzy_match(low, valid_values), fuzzy_match(high, valid_values)
         if low_eu and high_eu and low_eu != high_eu:
@@ -472,7 +514,7 @@ def match_shoe_size_eu(raw: str | None, valid_values: list[str] | None) -> str |
     return None
 
 
-def size_display(raw_size, uk_shoe=None, eu_shoe=None, clothing_size=None, both=False):
+def size_display(raw_size, uk_shoe=None, eu_shoe=None, clothing_size=None, both=False, brand=None):
     """The one size string the title and description are built from, so they
     can never disagree with each other or with the C: columns.
 
@@ -487,12 +529,12 @@ def size_display(raw_size, uk_shoe=None, eu_shoe=None, clothing_size=None, both=
 
     Clothing sizes have no conversion and are shown exactly as recorded."""
     if uk_shoe or eu_shoe:
-        system, number = parse_shoe_size(raw_size)
+        system, number = parse_shoe_size(raw_size, brand)
         if system is None:
             # A range ("2.5-3.5") is still recorded in a definite system, so
             # it follows the same rule: shown in the system it was recorded
             # in, with the conversion alongside in the description.
-            range_system, low, high = parse_shoe_size_range(raw_size)
+            range_system, low, high = parse_shoe_size_range(raw_size, brand)
             if range_system:
                 system, number = range_system, f"{low}-{high}"
         if system == "UK":
@@ -504,6 +546,28 @@ def size_display(raw_size, uk_shoe=None, eu_shoe=None, clothing_size=None, both=
             other = f"EU {eu_shoe}" if uk_shoe and eu_shoe else None
         return f"{primary} ({other})" if both and other else primary
     return clothing_size or None
+
+
+def size_display_for(product, specifics, both=False, clothing_fallback=False):
+    """size_display wired up from a product and its resolved item specifics.
+
+    Exists because this wiring — which keys to read, and remembering to pass
+    the brand — was written out three times (content_generator for the title,
+    build for the description, pipeline for the checks). Mutation testing on
+    05.09.26 showed two of the three could silently drop the brand and leave
+    every test green, which would have put "UK 10" in a description whose
+    item specific said 9.5. One copy, one place to get right."""
+    clothing = specifics.get("C:Size")
+    if clothing_fallback and not clothing:
+        clothing = product.measurements.get("Size")
+    return size_display(
+        product.measurements.get("Size"),
+        uk_shoe=specifics.get("C:UK Shoe Size"),
+        eu_shoe=specifics.get("C:EU Shoe Size"),
+        clothing_size=clothing,
+        both=both,
+        brand=product.master.get("Brand"),
+    )
 
 
 # An explicit size mention in a title: a system marker followed by a number

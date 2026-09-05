@@ -96,13 +96,8 @@ def build_description(
     # title, description and C: columns can never disagree. both=True adds
     # the converted size in brackets ("EU 45 (UK 11)") — the description is
     # where there's room to spell it out, while the title stays as recorded.
-    size = aspect_matching.size_display(
-        meas.get("Size"),
-        uk_shoe=specifics.get("C:UK Shoe Size"),
-        eu_shoe=specifics.get("C:EU Shoe Size"),
-        clothing_size=specifics.get("C:Size") or meas.get("Size"),
-        both=True,
-    ) or ""
+    size = aspect_matching.size_display_for(
+        product, specifics, both=True, clothing_fallback=True) or ""
 
     # Physical measurements (inches) — verified Pictures & Measurements file
     # only, same as Size above (see content_generator.MEASUREMENT_ASPECTS).

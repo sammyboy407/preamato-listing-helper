@@ -173,6 +173,33 @@ def _check_price(sku, row, issues):
         issues.append(Issue(sku, "REVIEW", f"start price £{price:.0f} is above the RRP of £{rrp:.0f}"))
 
 
+def _explain_bad_measurement(column, value, low, high):
+    """Names the most likely correct reading rather than just saying the
+    number is wrong. Sammy, 04.09.26: garments are measured laying flat, so
+    a pit to pit of 230 is a slipped decimal for 23, not a mystery.
+
+    Order matters. A Length of 90 divides by 10 into a plausible 9, but 90 is
+    far more likely to be 90cm (35.4 inches) typed into an inches column, so
+    centimetres is tested first over the range where someone would plausibly
+    have typed them.
+
+    Deliberately a suggestion, never an auto-correction. 230 could be 23 with
+    a stray zero, 30 with a stray 2, or 20 with a stray 3 — three readings
+    that all produce a believable number on a live listing. The code cannot
+    tell which, so it names the likeliest and lets a person settle it in two
+    seconds, the same principle as the mini/midi skirt."""
+    as_cm = value / 2.54
+    if 40 <= value <= 130 and low <= as_cm <= high:
+        return (f"{column} is {value:g}, outside the plausible {low}-{high} inches — "
+                f"this looks like centimetres ({value:g}cm is {as_cm:.1f} inches)")
+    shifted = value / 10
+    if low <= shifted <= high:
+        return (f"{column} is {value:g}, impossible for a garment measured laying flat — "
+                f"most likely a slipped decimal for {shifted:g}. Check the scan sheet")
+    return (f"{column} is {value:g}, outside the plausible {low}-{high} inches — "
+            f"check for a typo or a cm value")
+
+
 def _check_measurements(sku, product, issues):
     """Catches a slipped decimal or a centimetre value in an inches column.
     Wide bounds on purpose — this is for data-entry slips, not unusual
@@ -187,9 +214,7 @@ def _check_measurements(sku, product, issues):
             issues.append(Issue(sku, "REVIEW", f"{column} isn't a number: {raw!r}"))
             continue
         if not (low <= value <= high):
-            issues.append(Issue(
-                sku, "REVIEW",
-                f"{column} is {value:g}, outside the plausible {low}–{high} inches — check for a typo or a cm value"))
+            issues.append(Issue(sku, "REVIEW", _explain_bad_measurement(column, value, low, high)))
 
 
 def _check_assumed_size(sku, product, row, issues):
@@ -200,19 +225,34 @@ def _check_assumed_size(sku, product, row, issues):
     Sammy's call, 04.09.26, having looked at the brands: her stock comes
     through UK retail, so the number someone read off the label was the UK
     one. Listed as UK, and recorded here as a NOTE rather than a REVIEW so
-    the assumption stays auditable without burying the report. Only fires
-    where it matters — a row that actually ended up with a UK shoe size."""
+    the assumption stays auditable without burying the report.
+
+    Brands on aspect_matching.US_SIZED_BRANDS are the exception and get their
+    own group, since the reading and the evidence behind it are different.
+    Only fires where it matters — a row that ended up with a UK shoe size."""
     uk_size = _text(row.get("C:UK Shoe Size"))
     if not uk_size:
         return
     raw = product.measurements.get("Size")
-    if aspect_matching.is_assumed_shoe_system(raw):
-        issues.append(Issue(
-            sku, "NOTE",
-            f"{_text(raw)} -> UK {uk_size}",
-            group=("recorded as a bare number with no UK/EU/US marker, listed as UK "
-                   "(Sammy's call 04.09.26, given the brands come through UK retail). "
-                   "Spot-check any of these against the shoe if a size query comes in")))
+    brand = product.master.get("Brand")
+    assumed = aspect_matching.assumed_shoe_system(raw, brand)
+    if not assumed:
+        return
+    if assumed == "UK":
+        group = ("recorded as a bare number with no UK/EU/US marker, listed as UK "
+                 "(Sammy's call 04.09.26, given the brands come through UK retail). "
+                 "Spot-check any of these against the shoe if a size query comes in")
+        issues.append(Issue(sku, "NOTE", f"{_text(raw)} -> UK {uk_size}", group=group))
+    else:
+        # A brand on aspect_matching.US_SIZED_BRANDS. Still an assumption, but
+        # a better-evidenced one, so it is recorded separately rather than
+        # buried among the UK ones.
+        group = (f"recorded as a bare number, read as {assumed} because the brand is on the "
+                 f"US-sized list (aspect_matching.US_SIZED_BRANDS). Recording '{assumed} 10' "
+                 f"style at intake would remove the guesswork entirely")
+        issues.append(Issue(sku, "NOTE",
+                            f"{_text(brand)}: {_text(raw)} -> {assumed} {_text(raw)} -> UK {uk_size}",
+                            group=group))
 
 
 def _check_range_size(sku, product, row, issues):

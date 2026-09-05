@@ -151,21 +151,59 @@ def test_photos_and_price():
           any("price" in m for m in messages(run(good_row(), size="8"))), False)
 
 
+def test_a_bad_measurement_names_the_likely_reading():
+    """Sammy, 04.09.26: garments are measured laying flat, so a pit to pit of
+    230 is a slipped decimal for 23. Saying so turns a puzzle into a two
+    second confirmation. Never auto-corrected: 230 could be 23, 30 or 20, and
+    all three would look believable on a live listing."""
+    slipped = make_product({"Pit to Pit (inches)": "230"})
+    # One run, inspected several ways. Running twice against the same product
+    # would hide an implementation that overwrites the measurement, since the
+    # second run would see an already-corrected value and report nothing.
+    issues = run(good_row(), product=slipped, size="8")
+    found = messages(issues)
+    check("names the slipped decimal", any("slipped decimal for 23" in m for m in found), True)
+    check("says why it is impossible", any("laying flat" in m for m in found), True)
+    check("nothing is auto-corrected", messages(issues, "FIX"), [])
+    check("the measurement itself is left alone",
+          slipped.measurements["Pit to Pit (inches)"], "230")
+
+    # Centimetres wins over the divide-by-ten reading where both would fit:
+    # a Length of 90 divides into a plausible 9, but is far more likely 90cm.
+    cm = make_product({"Length (inches)": "90"})
+    found = messages(run(good_row(), product=cm, size="8"))
+    check("reads 90 as centimetres", any("looks like centimetres" in m for m in found), True)
+    check("and converts it for them", any("35.4 inches" in m for m in found), True)
+    check("not as a slipped decimal", any("slipped decimal" in m for m in found), False)
+
+    # A pit to pit of 58 is 22.8 inches in cm, entirely plausible.
+    check("reads 58 as centimetres",
+          any("looks like centimetres" in m for m in
+              messages(run(good_row(), product=make_product({"Pit to Pit (inches)": "58"}), size="8"))), True)
+
+    # Nonsense that fits neither reading still gets named, just generically.
+    weird = make_product({"Pit to Pit (inches)": "9999"})
+    found = messages(run(good_row(), product=weird, size="8"))
+    check("unexplainable values are still reported", any("9999" in m for m in found), True)
+    check("without inventing a reading",
+          any("slipped decimal" in m or "centimetres" in m for m in found), False)
+
+
 def test_mistyped_measurements():
     """A slipped decimal (230 for 23) or a centimetre value in an inches
     column. Bounds are wide on purpose — this is for data-entry slips, not
     for second-guessing an unusual garment."""
     typo = make_product({"Pit to Pit (inches)": "230"})
     check("implausible measurement reported",
-          any("plausible" in m for m in messages(run(good_row(), product=typo, size="8"))), True)
+          len(messages(run(good_row(), product=typo, size="8"))), 1)
 
     cm = make_product({"Length (inches)": "90"})  # 90cm typed into an inches column
     check("a cm value reported",
-          any("plausible" in m for m in messages(run(good_row(), product=cm, size="8"))), True)
+          len(messages(run(good_row(), product=cm, size="8"))), 1)
 
     real = make_product({"Pit to Pit (inches)": "23", "Length (inches)": "37", "Arm (inches)": "26"})
     check("real measurements are silent",
-          any("plausible" in m for m in messages(run(good_row(), product=real, size="8"))), False)
+          messages(run(good_row(), product=real, size="8")), [])
 
     check("non-numeric measurement reported",
           any("isn't a number" in m for m in
@@ -210,6 +248,40 @@ def test_an_assumed_uk_size_is_recorded_as_a_note_not_a_review():
 
     check("a row with no shoe size records nothing",
           [i for i in run(good_row(), product=product, size="8") if i.kind == "NOTE"], [])
+
+
+def test_a_us_brand_assumption_is_recorded_separately():
+    """A bare number on a US-sized brand is still an assumption, but a
+    different one with different evidence behind it, so it gets its own
+    grouped block rather than being mixed in with the UK ones."""
+    product = Product(sku="TEST-001",
+                      master={"Brand": "BLACKSTOCK & WEBER", "Gender": "MEN", "Colour": "Brown"},
+                      measurements={"Size": "10"})
+    row = good_row(Title="BLACKSTOCK & WEBER Loafer Brown UK 9.5 RRP 445",
+                   **{"C:UK Shoe Size": "9.5"})
+    notes = [i for i in run(row, product=product, size="UK 9.5") if i.kind == "NOTE"]
+    check("the assumption is recorded", len(notes), 1)
+    check("it shows the whole chain", notes[0].message if notes else None,
+          "BLACKSTOCK & WEBER: 10 -> US 10 -> UK 9.5")
+    check("its heading names the brand rule",
+          bool(notes and "US-sized list" in (notes[0].group or "")), True)
+
+    # A UK-default brand keeps the original wording and its own heading.
+    uk_product = Product(sku="TEST-002",
+                         master={"Brand": "GH BASS", "Gender": "MEN", "Colour": "Brown"},
+                         measurements={"Size": "10"})
+    uk_notes = [i for i in run(good_row(**{"C:UK Shoe Size": "10"}), product=uk_product, size="UK 10")
+                if i.kind == "NOTE"]
+    check("the UK note is unchanged", uk_notes[0].message if uk_notes else None, "10 -> UK 10")
+    check("and sits under a different heading",
+          bool(uk_notes and notes and uk_notes[0].group != notes[0].group), True)
+
+    # An explicitly marked size on a US brand is not an assumption at all.
+    explicit = Product(sku="TEST-003",
+                       master={"Brand": "BLACKSTOCK & WEBER", "Gender": "MEN", "Colour": "Brown"},
+                       measurements={"Size": "US10"})
+    check("an explicit US size records nothing",
+          [i for i in run(row, product=explicit, size="UK 9.5") if i.kind == "NOTE"], [])
 
 
 def test_notes_never_crowd_out_the_things_that_need_a_person():

@@ -82,10 +82,12 @@ def _sizing_sources() -> list:
         aspect_matching.enforce_title_size,
         aspect_matching.match_shoe_size_uk, aspect_matching.match_shoe_size_eu,
         aspect_matching.match_size, aspect_matching.size_display,
+        aspect_matching.size_display_for,
         aspect_matching.fuzzy_match, aspect_matching.parse_shoe_size,
         aspect_matching.parse_shoe_size_range, aspect_matching._resolve_range_end,
         aspect_matching._normalise_size_marker, aspect_matching.is_assumed_shoe_system,
         aspect_matching._eu_to_uk_table, aspect_matching._us_to_uk_table,
+        aspect_matching.bare_number_system, aspect_matching.assumed_shoe_system,
     ]
 
 
@@ -107,6 +109,7 @@ def _sizing_fingerprint() -> str:
     parts.append(repr(sorted(aspect_matching.US_TO_UK_MENS_SHOE_SIZE.items())))
     parts.append(repr(sorted(aspect_matching.US_TO_UK_WOMENS_SHOE_SIZE.items())))
     parts.append(repr(aspect_matching.BARE_NUMBER_SHOE_SYSTEM))
+    parts.append(repr(sorted(aspect_matching.US_SIZED_BRANDS)))
     parts.append(repr(sorted(aspect_matching.SIZE_ALIASES.items())))
     return hashlib.sha256("".join(parts).encode()).hexdigest()[:12]
 
@@ -278,9 +281,10 @@ def _resolve_size(name: str, product: Product, spec: ebay_template.AspectSpec) -
         # the UK list and never passed through raw: the raw number is on a
         # different scale, so an unconverted value in a UK field is a wrong
         # size, not a differently-formatted right one.
-        return aspect_matching.match_shoe_size_uk(raw, spec.values, m.get("Gender"))
+        return aspect_matching.match_shoe_size_uk(raw, spec.values, m.get("Gender"),
+                                                  brand=m.get("Brand"))
     if name == "C:EU Shoe Size":
-        return aspect_matching.match_shoe_size_eu(raw, spec.values)
+        return aspect_matching.match_shoe_size_eu(raw, spec.values, brand=m.get("Brand"))
     if name in ("C:US Shoe Size", "C:AU Shoe Size"):
         # Deliberately left blank (both are Preferred, never Required).
         # 04.09.26: these were being filled by the same broken direct match
@@ -614,12 +618,7 @@ def generate_for_product(
             resolved[name] = value
 
     raw_size = product.measurements.get("Size")
-    size_for_title = aspect_matching.size_display(
-        raw_size,
-        uk_shoe=resolved.get("C:UK Shoe Size"),
-        eu_shoe=resolved.get("C:EU Shoe Size"),
-        clothing_size=resolved.get("C:Size"),
-    )
+    size_for_title = aspect_matching.size_display_for(product, resolved)
 
     # 2. The AI call, for the fields that genuinely need judgment.
     enum_specs, hybrid_specs, multi_specs, skipped = classify_aspects(category.category_id, template)
@@ -799,7 +798,7 @@ def _size_failure_detail(name: str, product: Product, spec: ebay_template.Aspect
             "item). Add this SKU's size to the Measurements file and re-run."
         )
     if "Shoe Size" in name:
-        system, number = aspect_matching.parse_shoe_size(raw_size)
+        system, number = aspect_matching.parse_shoe_size(raw_size, product.master.get("Brand"))
         gender = str(product.master.get("Gender") or "").strip().upper()
         if system is None and number is not None:
             # Only reachable if BARE_NUMBER_SHOE_SYSTEM is set back to None.

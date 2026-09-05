@@ -254,12 +254,7 @@ def run(
         specifics = ai_results[p.sku].get("item_specifics", {})
         issues.extend(validation.check_row(
             p, row, category, template,
-            size_for_display=aspect_matching.size_display(
-                p.measurements.get("Size"),
-                uk_shoe=specifics.get("C:UK Shoe Size"),
-                eu_shoe=specifics.get("C:EU Shoe Size"),
-                clothing_size=specifics.get("C:Size"),
-            ),
+            size_for_display=aspect_matching.size_display_for(p, specifics),
         ))
 
         if idx not in results_by_template:

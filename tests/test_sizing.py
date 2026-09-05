@@ -164,6 +164,62 @@ def test_bare_numbers_are_read_as_uk_and_flagged():
     check("blank is not flagged", am.is_assumed_shoe_system(None), False)
 
 
+def test_a_bare_number_follows_the_brand_rule():
+    """Sammy, 05.09.26, from the first 295-row batch. Blackstock & Weber had
+    three pairs recorded three ways: "US10", "uk 6" and a bare "10". The US10
+    and the bare 10 are the same Penny Pony Loafer at the same RRP, and they
+    went out half a size apart because the bare one took the UK default.
+
+    So a bare number means US for the brands on US_SIZED_BRANDS. An explicit
+    marker always wins, whatever the brand — that is what keeps the rule from
+    doing damage when the intake data IS marked."""
+    check("bare number on a US brand converts",
+          am.match_shoe_size_uk("10", UK_MENS, "MEN", brand="BLACKSTOCK & WEBER"), "9.5")
+    check("VISVIM too", am.match_shoe_size_uk("9", UK_MENS, "MEN", brand="VISVIM"), "8.5")
+    check("the same number on any other brand stays UK",
+          am.match_shoe_size_uk("10", UK_MENS, "MEN", brand="GH BASS"), "10")
+    check("no brand at all stays UK",
+          am.match_shoe_size_uk("10", UK_MENS, "MEN"), "10")
+
+    # The guard rail: an explicit marker is never overridden by the brand.
+    check("explicit UK on a US brand stays UK",
+          am.match_shoe_size_uk("uk 6", UK_MENS, "MEN", brand="BLACKSTOCK & WEBER"), "6")
+    check("explicit EU on a US brand still converts as EU",
+          am.match_shoe_size_uk("EU 45", UK_MENS, "MEN", brand="BLACKSTOCK & WEBER"), "11")
+    check("explicit US on a US brand is unchanged",
+          am.match_shoe_size_uk("US10", UK_MENS, "MEN", brand="BLACKSTOCK & WEBER"), "9.5")
+    check("the marked and the bare pair now agree",
+          am.match_shoe_size_uk("US10", UK_MENS, "MEN", brand="BLACKSTOCK & WEBER"),
+          am.match_shoe_size_uk("10", UK_MENS, "MEN", brand="BLACKSTOCK & WEBER"))
+
+    # Brand names come off a spreadsheet, so matching can't be fussy.
+    for spelling in ("blackstock & weber", "  BLACKSTOCK & WEBER  ", "Blackstock  &  Weber"):
+        check(f"brand matching survives {spelling!r}",
+              am.match_shoe_size_uk("10", UK_MENS, "MEN", brand=spelling), "9.5")
+    check("a near-miss brand is NOT treated as US",
+          am.match_shoe_size_uk("10", UK_MENS, "MEN", brand="Blackstock"), "10")
+
+    # A US brand still needs a gender, same as any other US size.
+    check("US brand with unknown gender is refused",
+          am.match_shoe_size_uk("10", UK_MENS, "UNISEX", brand="BLACKSTOCK & WEBER"), None)
+
+    # Ranges follow the brand rule too.
+    check("a bare range on a US brand converts",
+          am.match_shoe_size_uk("9-10", UK_MENS, "MEN", brand="BLACKSTOCK & WEBER"), "8.5-9.5")
+    check("a bare range elsewhere stays UK",
+          am.match_shoe_size_uk("9-10", UK_MENS, "MEN", brand="GH BASS"), "9-10")
+
+    # And the report has to be able to say WHICH reading was assumed.
+    check("assumed scale is named for a US brand",
+          am.assumed_shoe_system("10", "BLACKSTOCK & WEBER"), "US")
+    check("assumed scale is named for everything else",
+          am.assumed_shoe_system("10", "GH BASS"), "UK")
+    check("an explicit size is not an assumption",
+          am.assumed_shoe_system("US10", "BLACKSTOCK & WEBER"), None)
+    check("an EU size is not an assumption",
+          am.assumed_shoe_system("45", "GH BASS"), None)
+
+
 def test_us_sizes_convert_by_gender():
     """9 rows of the QTN02 parcel came in as "US9"/"US11". Women's UK is
     US - 2, men's is US - 0.5; the two differ, so gender is required exactly
@@ -388,9 +444,181 @@ def test_generated_listing_agrees_with_itself_end_to_end():
     check("end-to-end: EU Shoe Size item specific", specifics.get("C:EU Shoe Size"), "45")
     check("end-to-end: title carries the recorded EU size",
           "EU 45" in title, True)
+    # The title shows the recorded system only. Spelling the conversion out
+    # belongs in the description, where there is room — a title has 80
+    # characters and eBay truncates.
+    check("end-to-end: the title does NOT spell out the conversion",
+          "(UK 11)" in title, False)
     for bad in ("UK 4.5", "EU 39", "UK 7"):
         if bad in title:
             FAILURES.append(f"end-to-end: title still contains the AI's invented {bad!r}: {title!r}")
+
+
+def test_the_brand_rule_survives_the_whole_pipeline():
+    """The unit checks above prove match_shoe_size_uk honours the brand. This
+    one proves the brand actually REACHES it.
+
+    Found by mutation testing on 05.09.26: dropping `brand=` from the call in
+    content_generator silently reverted every US-brand size to the UK reading
+    and left all twelve unit checks green. The feature can only be trusted
+    end to end, so it is tested end to end."""
+    import tempfile
+    from src import ai_client, content_generator, ebay_template
+    from src.data_loader import Product
+
+    templates_dir = Path(__file__).resolve().parent.parent / "data" / "templates"
+    menswear = templates_dir / "menswear_shoes.json"
+    if not menswear.exists():
+        print("  (skipped end-to-end brand check: data/templates not present in this checkout)")
+        return
+
+    template = ebay_template.load_template(menswear)
+    category = template.category_by_id("24087")  # Men's Shoes > Casual Shoes
+
+    def fake_ai(system, user, tool_name, input_schema, **kwargs):
+        props = input_schema["properties"]["item_specifics"]["properties"]
+        required = set(input_schema["properties"]["item_specifics"].get("required", []))
+        specifics = {}
+        for name, spec in props.items():
+            if name not in required:
+                continue
+            if spec.get("type") == "array":
+                specifics[name] = spec["items"]["enum"][:1]
+            elif "enum" in spec:
+                specifics[name] = spec["enum"][0]
+            else:
+                specifics[name] = "Leather"
+        return {"title": "Penny Pony Loafer Brown RRP 445",
+                "condition_id": category.conditions[0][0],
+                "condition_description": "Good condition.",
+                "material_summary": "Calf Leather",
+                "item_specifics": specifics}
+
+    def run_one(brand, raw_size):
+        product = Product(
+            sku="TEST-BRAND",
+            master={"Brand": brand, "Gender": "MEN", "Colour": "Brown",
+                    "Category": "Footwear", "SubCat2": "Shoes", "Rounded RRP": 445,
+                    "Clean Title Description": f"{brand} PENNY PONY LOAFER"},
+            measurements={"Size": raw_size, "Description": "Good condition."})
+        original = ai_client.call_structured
+        ai_client.call_structured = fake_ai
+        try:
+            with tempfile.TemporaryDirectory() as cache_dir:
+                return content_generator.generate_for_product(
+                    product, category, template, cache_dir, force=True)
+        finally:
+            ai_client.call_structured = original
+
+    # The exact pair from Sammy's batch: same shoe, one marked, one bare.
+    marked_r = run_one("BLACKSTOCK & WEBER", "US10")
+    bare_r = run_one("BLACKSTOCK & WEBER", "10")
+    marked = marked_r["item_specifics"].get("C:UK Shoe Size")
+    bare = bare_r["item_specifics"].get("C:UK Shoe Size")
+    check("end-to-end: an explicit US10 gives UK 9.5", marked, "9.5")
+    check("end-to-end: a bare 10 on the same brand gives UK 9.5", bare, "9.5")
+    check("end-to-end: the two agree, which they did not before this fix", marked, bare)
+
+    # The title has to move with the item specific. Without the brand reaching
+    # size_display the specific says 9.5 while the title still says UK 10,
+    # which is the exact title-vs-specifics disagreement Sammy ruled out on
+    # 04.09.26 ("it cant show UK7 in the title and then 7.5 in the item
+    # specifics"). Caught by mutation testing 05.09.26.
+    check("end-to-end: the bare-number title matches its item specific",
+          f"UK {bare}" in bare_r["title"], True)
+    check("end-to-end: and the marked one too",
+          f"UK {marked}" in marked_r["title"], True)
+    check("end-to-end: the title does not carry the raw US number as a UK size",
+          "UK 10" in bare_r["title"], False)
+    check("end-to-end: both titles read identically",
+          bare_r["title"], marked_r["title"])
+
+    # And the rule stays off for everyone else.
+    other = run_one("GH BASS", "10")
+    check("end-to-end: a bare 10 on another brand is still UK 10",
+          other["item_specifics"].get("C:UK Shoe Size"), "10")
+    check("end-to-end: and its title says UK 10", "UK 10" in other["title"], True)
+
+
+def test_one_size_string_feeds_title_description_and_checks():
+    """Title, description and the checks report must all describe the size
+    the same way. They used to build it from three separate copies of the
+    same wiring, and mutation testing on 05.09.26 showed two of the three
+    could silently drop the brand. They now share size_display_for, and this
+    proves the shared helper is what they use."""
+    from src.data_loader import Product
+
+    us_brand = Product(
+        sku="T1",
+        master={"Brand": "BLACKSTOCK & WEBER", "Gender": "MEN"},
+        measurements={"Size": "10"})
+    specifics = {"C:UK Shoe Size": "9.5"}
+    check("US-brand bare number reads as its converted UK size",
+          am.size_display_for(us_brand, specifics), "UK 9.5")
+    check("and never as the raw number",
+          am.size_display_for(us_brand, specifics) == "UK 10", False)
+
+    uk_brand = Product(sku="T2", master={"Brand": "GH BASS", "Gender": "MEN"},
+                       measurements={"Size": "10"})
+    check("everyone else still reads as UK 10",
+          am.size_display_for(uk_brand, {"C:UK Shoe Size": "10"}), "UK 10")
+
+    # The description spells the conversion out; the title does not.
+    eu = Product(sku="T3", master={"Brand": "ROA", "Gender": "MEN"},
+                 measurements={"Size": "45"})
+    eu_specifics = {"C:UK Shoe Size": "11", "C:EU Shoe Size": "45"}
+    check("title form", am.size_display_for(eu, eu_specifics), "EU 45")
+    check("description form", am.size_display_for(eu, eu_specifics, both=True), "EU 45 (UK 11)")
+
+    # Clothing: the description falls back to the recorded size, the title
+    # does not. That difference is deliberate and easy to lose.
+    shirt = Product(sku="T4", master={"Brand": "VISVIM", "Gender": "MEN"},
+                    measurements={"Size": "03"})
+    check("clothing with no matched size gives nothing for the title",
+          am.size_display_for(shirt, {}), None)
+    check("but the description falls back to what was recorded",
+          am.size_display_for(shirt, {}, clothing_fallback=True), "03")
+
+
+def test_the_buyer_facing_description_says_the_same_size():
+    """The description is what the buyer actually reads, and until now
+    nothing tested it. Mutation testing on 05.09.26 found three separate ways
+    its Size line could go wrong with every other test still green: losing
+    the brand, losing the conversion in brackets, and losing the fallback to
+    the recorded size for clothing."""
+    from src import build, ebay_template
+    from src.data_loader import Product
+
+    templates_dir = Path(__file__).resolve().parent.parent / "data" / "templates"
+    menswear = templates_dir / "menswear_shoes.json"
+    if not menswear.exists():
+        print("  (skipped description check: data/templates not present in this checkout)")
+        return
+    template = ebay_template.load_template(menswear)
+    category = template.category_by_id("24087")
+
+    def size_line(brand, raw_size, specifics):
+        product = Product(
+            sku="T", master={"Brand": brand, "Gender": "MEN", "Colour": "Brown",
+                             "Rounded RRP": 445, "Season": "AW25", "Category": "Footwear"},
+            measurements={"Size": raw_size, "Description": "Good condition."})
+        ai_result = {"condition_description": "Good condition.", "material_summary": "Leather",
+                     "item_specifics": specifics, "style": "Loafer", "type": "Casual"}
+        text = build.build_description(product, ai_result, category, template, {})
+        for line in text.replace("<br>", "").splitlines():
+            if line.strip().startswith("Size:"):
+                return line.strip().rstrip()
+        return None
+
+    check("US-brand bare number shows the converted size, not the raw one",
+          size_line("BLACKSTOCK & WEBER", "10", {"C:UK Shoe Size": "9.5"}), "Size: UK 9.5")
+    check("everyone else is unaffected",
+          size_line("GH BASS", "10", {"C:UK Shoe Size": "10"}), "Size: UK 10")
+    check("an EU size spells the conversion out for the buyer",
+          size_line("ROA", "45", {"C:UK Shoe Size": "11", "C:EU Shoe Size": "45"}),
+          "Size: EU 45 (UK 11)")
+    check("clothing with no matched size still shows what was recorded",
+          size_line("VISVIM", "03", {}), "Size: 03")
 
 
 def test_changing_a_sizing_rule_invalidates_the_cache():
@@ -410,6 +638,15 @@ def test_changing_a_sizing_rule_invalidates_the_cache():
     finally:
         aspect_matching.US_TO_UK_MENS_SHOE_SIZE.clear()
         aspect_matching.US_TO_UK_MENS_SHOE_SIZE.update(us_original)
+
+    brands_original = set(aspect_matching.US_SIZED_BRANDS)
+    try:
+        aspect_matching.US_SIZED_BRANDS.add("SOME OTHER BRAND")
+        check("changing the US brand list changes the cache fingerprint",
+              content_generator._sizing_fingerprint() != baseline, True)
+    finally:
+        aspect_matching.US_SIZED_BRANDS.clear()
+        aspect_matching.US_SIZED_BRANDS.update(brands_original)
 
     bare_original = aspect_matching.BARE_NUMBER_SHOE_SYSTEM
     try:
@@ -442,6 +679,7 @@ def test_changing_a_sizing_rule_invalidates_the_cache():
         "_normalise_size_marker", "is_assumed_shoe_system", "match_shoe_size_uk",
         "match_shoe_size_eu", "_eu_to_uk_table", "_us_to_uk_table",
         "size_display", "enforce_title_size", "fuzzy_match", "match_size",
+        "bare_number_system", "assumed_shoe_system", "size_display_for",
     }
     missing = sorted(must_be_hashed - hashed)
     if missing:
