@@ -14,6 +14,12 @@ outcome:
           act on it.
   REVIEW  something looks wrong but the code can't tell which side is wrong.
           Named with both values so a human can settle it in a few seconds.
+  NOTE    an assumption the code made that Sammy has already signed off, kept
+          for the audit trail. Collapsed into one grouped block at the end of
+          the report rather than one line per SKU: on the 295-row footwear
+          parcel the bare-number assumption applies to 65 rows, and 65 lines
+          of something already decided would bury the handful of REVIEWs that
+          actually need her.
 
 A REVIEW never blocks the file. A listing with a genuinely fatal problem (no
 required size) is already skipped upstream in content_generator; these are
@@ -63,8 +69,9 @@ LENGTH_CONTRADICTIONS = {
 @dataclass
 class Issue:
     sku: str
-    kind: str  # "FIX" or "REVIEW"
+    kind: str  # "FIX", "REVIEW" or "NOTE"
     message: str
+    group: str | None = None  # NOTE only: the heading these are collected under
 
     def __str__(self) -> str:
         return f"[{self.kind}] {self.sku}: {self.message}"
@@ -190,19 +197,22 @@ def _check_assumed_size(sku, product, row, issues):
     so reading it as UK 9 is an assumption, not a fact — right for UK-sourced
     stock, half a size out if the pair was actually marked US 9.
 
-    Sammy's call, 04.09.26: convert them so the stock lists, but name every
-    one here so a few can be checked against the physical shoes before the
-    batch goes up. Only fires where it matters — a row that actually ended up
-    with a UK shoe size on it."""
+    Sammy's call, 04.09.26, having looked at the brands: her stock comes
+    through UK retail, so the number someone read off the label was the UK
+    one. Listed as UK, and recorded here as a NOTE rather than a REVIEW so
+    the assumption stays auditable without burying the report. Only fires
+    where it matters — a row that actually ended up with a UK shoe size."""
     uk_size = _text(row.get("C:UK Shoe Size"))
     if not uk_size:
         return
     raw = product.measurements.get("Size")
     if aspect_matching.is_assumed_shoe_system(raw):
         issues.append(Issue(
-            sku, "REVIEW",
-            f"size was recorded as a bare {_text(raw)!r} with no UK/EU/US marker, so it was "
-            f"read as UK {uk_size} — check this pair against the shoe before uploading"))
+            sku, "NOTE",
+            f"{_text(raw)} -> UK {uk_size}",
+            group=("recorded as a bare number with no UK/EU/US marker, listed as UK "
+                   "(Sammy's call 04.09.26, given the brands come through UK retail). "
+                   "Spot-check any of these against the shoe if a size query comes in")))
 
 
 def _check_range_size(sku, product, row, issues):
@@ -254,9 +264,19 @@ def summarise(issues: list[Issue]) -> str:
     handful of exceptions rather than a wall of text."""
     if not issues:
         return "All listings passed every check."
+    if not [i for i in issues if i.kind != "NOTE"]:
+        lines = ["All listings passed every check."]
+        for group in sorted({i.group or "" for i in issues}):
+            in_group = [i for i in issues if (i.group or "") == group]
+            lines.append("")
+            lines.append(f"{len(in_group)} listing(s) {group}:")
+            for issue in in_group:
+                lines.append(f"  {issue.sku}  {issue.message}")
+        return "\n".join(lines)
 
     reviews = [i for i in issues if i.kind == "REVIEW"]
     fixes = [i for i in issues if i.kind == "FIX"]
+    notes = [i for i in issues if i.kind == "NOTE"]
     lines = []
     if reviews:
         skus = sorted({i.sku for i in reviews})
@@ -269,4 +289,10 @@ def summarise(issues: list[Issue]) -> str:
         lines.append(f"{len(fixes)} thing(s) corrected automatically:")
         for issue in fixes:
             lines.append(f"  {issue.sku}: {issue.message}")
+    for group in sorted({i.group or "" for i in notes}):
+        in_group = [i for i in notes if (i.group or "") == group]
+        lines.append("")
+        lines.append(f"{len(in_group)} listing(s) {group}:")
+        for issue in in_group:
+            lines.append(f"  {issue.sku}  {issue.message}")
     return "\n".join(lines)

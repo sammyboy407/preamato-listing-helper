@@ -363,8 +363,15 @@ def run(
 
     reviews = [i for i in issues if i.kind == "REVIEW"]
     fixes = [i for i in issues if i.kind == "FIX"]
+    notes = [i for i in issues if i.kind == "NOTE"]
     if fixes:
         on_progress(f"{len(fixes)} thing(s) corrected automatically.", None)
+    if notes:
+        # Signed-off assumptions: counted here, spelled out in the report.
+        # Never listed line by line in the log, which is where the REVIEWs
+        # need to be visible.
+        on_progress(f"{len(notes)} listing(s) relied on a signed-off assumption "
+                    f"(see {report_path.name}).", None)
     if reviews:
         on_progress(
             f"{len(reviews)} thing(s) worth a look across "

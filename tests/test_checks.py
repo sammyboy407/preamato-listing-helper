@@ -182,26 +182,65 @@ def test_empty_description_line():
           any("line is empty" in m for m in messages(run(good_row(), size="8"))), False)
 
 
-def test_an_assumed_uk_size_is_flagged_for_spot_checking():
+def test_an_assumed_uk_size_is_recorded_as_a_note_not_a_review():
     """A bare "9" is converted (Sammy's call — the stock is UK-sourced), but
     every row that relied on that assumption has to be named in the report so
     a few can be checked against the physical shoes. Silent conversion is the
     dangerous version."""
     product = make_product({"Size": "9"}, brand="ROA")
     row = good_row(Title="ROA Boots Brown UK 9 RRP 395", **{"C:UK Shoe Size": "9"})
-    check("assumed size flagged",
-          any("no UK/EU/US marker" in m for m in messages(run(row, product=product, size="UK 9"))), True)
+    issues = run(row, product=product, size="UK 9")
+    assumed = [i for i in issues if i.kind == "NOTE"]
+    check("the assumption is recorded", len(assumed), 1)
+    # Guarded rather than indexed: if the kind regresses to REVIEW this list
+    # is empty, and a clean named failure is far more use than an IndexError
+    # traceback halfway through the suite.
+    check("it says what it did", assumed[0].message if assumed else None, "9 -> UK 9")
+    check("it carries a group heading", bool(assumed and assumed[0].group), True)
+    # The whole point: it must NOT compete with the things that need her.
+    check("it is not a REVIEW", messages(issues, "REVIEW"), [])
 
     explicit = make_product({"Size": "UK 9"}, brand="ROA")
-    check("an explicit UK size is not flagged",
-          any("no UK/EU/US marker" in m for m in messages(run(row, product=explicit, size="UK 9"))), False)
+    check("an explicit UK size records nothing",
+          [i for i in run(row, product=explicit, size="UK 9") if i.kind == "NOTE"], [])
 
     eu = make_product({"Size": "45"}, brand="ROA")
-    check("an EU size is not flagged",
-          any("no UK/EU/US marker" in m for m in messages(run(row, product=eu, size="EU 45"))), False)
+    check("an EU size records nothing",
+          [i for i in run(row, product=eu, size="EU 45") if i.kind == "NOTE"], [])
 
-    check("a row with no shoe size is not flagged",
-          any("no UK/EU/US marker" in m for m in messages(run(good_row(), product=product, size="8"))), False)
+    check("a row with no shoe size records nothing",
+          [i for i in run(good_row(), product=product, size="8") if i.kind == "NOTE"], [])
+
+
+def test_notes_never_crowd_out_the_things_that_need_a_person():
+    """65 signed-off assumptions plus one real contradiction: the
+    contradiction has to be the first thing on the page, not buried."""
+    issues = [validation.Issue(f"SKU-{n}", "NOTE", f"{n} -> UK {n}", group="read as UK")
+              for n in range(60)]
+    issues.insert(30, validation.Issue("SKU-REAL", "REVIEW", "Style says 'Mini' but it says 'Midi'"))
+    report = validation.summarise(issues)
+    lines = report.splitlines()
+
+    def first_line_containing(text):
+        return next((i for i, l in enumerate(lines) if text in l), None)
+
+    review_at = first_line_containing("Mini")
+    note_at = first_line_containing("read as UK")
+    check("the REVIEW is in the report", review_at is not None, True)
+    check("the notes are in the report", note_at is not None, True)
+    check("the REVIEW comes before the notes",
+          review_at is not None and note_at is not None and review_at < note_at, True)
+    check("the notes are one grouped block, not 60 SKU headings",
+          sum(1 for l in lines if "read as UK" in l), 1)
+    check("but every SKU is still named", sum(1 for l in lines if "-> UK" in l), 60)
+
+    # A batch whose only entries are signed-off assumptions still reads as a
+    # pass, because nothing in it needs acting on.
+    notes_only = validation.summarise([
+        validation.Issue("SKU-1", "NOTE", "9 -> UK 9", group="read as UK")])
+    check("a notes-only batch reads as a pass",
+          notes_only.startswith("All listings passed every check."), True)
+    check("and still names the SKU", "SKU-1" in notes_only, True)
 
 
 def test_a_range_size_is_named_in_the_report():
