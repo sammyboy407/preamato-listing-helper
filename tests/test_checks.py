@@ -598,6 +598,223 @@ def test_every_module_imports_on_this_python():
     check("every module in src/ imports", failures, [])
 
 
+def test_a_collaboration_title_is_named_in_the_report():
+    """Twelve titles in the 06.09.26 upload named a second brand and exactly
+    one was refused. The known-refused brands are stripped automatically, but
+    the list can only grow by evidence, so every collaboration title is named
+    in the report — when eBay refuses the next one, the report says which
+    title to look at and which brand to add."""
+    def collab_notes(issues):
+        return [i for i in issues if (i.group or "").startswith("Collaboration titles")]
+
+    row = good_row(Title="MM6 MAISON MARGIELA X Salomon XT-4 Mule Blue UK 3.5 RRP 295")
+    notes = collab_notes(run(row, size="UK 3.5"))
+    check("the collaboration is named", len(notes), 1)
+    # Guarded, so a missing note fails as a named check rather than an
+    # IndexError traceback that says nothing about which rule broke.
+    check("and the note carries the title",
+          bool(notes) and "MM6 MAISON MARGIELA X Salomon" in notes[0].message, True)
+    check("as a NOTE, not something needing action",
+          notes[0].kind if notes else None, "NOTE")
+
+    plain = good_row(Title="AEYDE Womens Agata Suede Ankle Boot Black EU 39 RRP 545")
+    check("an ordinary title is not", collab_notes(run(plain, size="EU 39")), [])
+
+
+def test_condition_description_is_dropped_for_new_with_box():
+    """eBay ignores ConditionDescription on condition 1000 and warns for
+    every row that sends one: 32 of 282 on 06.09.26, a third of the warnings
+    in the results file, which makes a real one harder to spot. The text is
+    already a "Condition:" line in the description body, so nothing is lost.
+
+    1500 and 1750 are also "new" in plain English but accept a description
+    and did not warn, so they must keep sending one."""
+    from src import build
+
+    check("1000 is the only condition that drops it", build.CONDITION_NO_DESCRIPTION, 1000)
+
+    def sent_for(condition_id):
+        product = make_product({"Size": "8"}, brand="SIMONE ROCHA")
+        product.master.update({"Rounded RRP": 695, "Colour": "White", "Season": "AW25",
+                               "Category": "Ready to Wear", "Gender": "WOMEN"})
+        ai_result = {"title": "SIMONE ROCHA Womens Tiered Mini Skirt White 8 RRP 695",
+                     "condition_id": condition_id,
+                     "condition_description": "Comes without its box.",
+                     "material_summary": "Silk", "item_specifics": {}}
+        row = build.build_row(product, ai_result, CATEGORY, make_template(), {},
+                              price_percent=50.0)
+        return row.get("ConditionDescription")
+
+    check("1000 sends nothing", sent_for(1000), None)
+    # 1500 and 1750 are also "new" in plain English but accept a description
+    # and did not warn, so they must keep sending one.
+    for condition_id in (1500, 1750, 2990, 3000, 3010):
+        check(f"condition {condition_id} still sends one",
+              sent_for(condition_id), "Comes without its box.")
+
+
+def test_internal_references_never_reach_a_buyer():
+    """Sammy, 06.09.26: no stockist names, and no QTNDAM codes.
+
+    35 live listings said "QTNDAM2" and 23 said "internal quality grade"
+    before this existed, because the raw code was being handed to the model
+    in the prompt. Two different treatments, and the difference matters:
+    a stockist name takes its whole sentence, a grading reference is
+    rewritten so the buyer keeps the warning."""
+    from src import aspect_matching as am
+
+    real = ("Brand new and unworn, however the internal quality grade indicates minor "
+            "cosmetic imperfections (QTNDAM2) that fall outside standard \"new\" grading. "
+            "Please review the photos.")
+    out = am.scrub_internal_references(real)
+    check("the code goes", "QTNDAM" in out, False)
+    check("the jargon goes", "internal quality grade" in out.lower(), False)
+    check("the warning stays", "minor cosmetic imperfections" in out, True)
+    check("and so does the instruction to look at the photos",
+          "review the photos" in out.lower(), True)
+    check("no stray brackets", "()" in out, False)
+    check("no double spaces", "  " in out, False)
+
+    # A stockist takes its sentence, because "originally from Browns" cannot
+    # be neutralised a word at a time.
+    check("a stockist sentence goes whole",
+          am.scrub_internal_references(
+              "Preloved pair originally from Browns. Some dirt on the sole."),
+          "Some dirt on the sole.")
+    for name in ("Farfetch", "Selfridges", "Harrods", "Net-a-Porter", "SSENSE",
+                 "Mytheresa", "MatchesFashion", "Harvey Nichols", "department store"):
+        text = f"Bought from {name} last season. Excellent condition."
+        check(f"{name} removed", am.scrub_internal_references(text), "Excellent condition.")
+
+    # The colour brown must survive. It appears in a third of these listings,
+    # and "Browns" is only the stockist in the plural.
+    for keep in ["Brown calf leather with light wear.",
+                 "Dark brown suede, gently worn.",
+                 "Gently worn with light scuffing to the sole."]:
+        check(f"kept: {keep[:22]}", am.scrub_internal_references(keep), keep)
+
+    # A rewrite landing at a sentence start is re-capitalised, but only the
+    # words the scrubber itself introduces, so "eBay" is never touched.
+    check("a rewritten sentence start is capitalised",
+          am.scrub_internal_references(
+              "Brand new. Internal quality grade notes a minor flaw."),
+          "Brand new. Our inspection notes a minor flaw.")
+    check("but an intentional lower-case word is not",
+          "eBay" in am.scrub_internal_references("Never listed. eBay authenticated."), True)
+
+    # The prompt itself must never carry the code. This is the root cause:
+    # src/content_generator.py line 422 handed the model "Internal quality
+    # grade: QTNDAM2" and it wrote about it 35 times.
+    from src import content_generator
+    graded = make_product({"Description": "Slight mark on the heel."})
+    graded.master.update({"Quality": "QTNDAM2", "Rounded RRP": 695,
+                          "Category": "Footwear", "SubCat2": "Flat Shoes"})
+    brief = content_generator._product_brief(graded)
+    check("the prompt does not contain the code", "QTNDAM" in brief.upper(), False)
+    check("nor the words internal quality grade",
+          "internal quality grade" in brief.lower(), False)
+    check("but it does still flag that something was found",
+          "imperfection" in brief.lower(), True)
+    clean = make_product({"Description": "Good condition."})
+    clean.master.update({"Quality": "", "Rounded RRP": 695})
+    check("and says none when nothing was flagged",
+          "flag: none" in content_generator._product_brief(clean).lower(), True)
+
+    # End to end, because the prompt is not a guarantee. This is the same
+    # shape as the brand casing and the size: asked for in the prompt,
+    # enforced in Python.
+    import tempfile
+    from src import ai_client
+
+    def dirty_ai(system, user, tool_name, input_schema, **kwargs):
+        return {"title": "SIMONE ROCHA Womens Tiered Mini Skirt White 8 RRP 695",
+                "condition_id": 3000,
+                "condition_description": ("Sourced from Farfetch. Our internal quality "
+                                          "grade (QTNDAM2) notes a small mark."),
+                "material_summary": "Silk", "item_specifics": {}}
+
+    original = ai_client.call_structured
+    ai_client.call_structured = dirty_ai
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            generated = content_generator.generate_for_product(
+                graded, CATEGORY, make_template(), d, force=True)
+    finally:
+        ai_client.call_structured = original
+    said = generated.get("condition_description", "")
+    check("end-to-end: no code reaches the listing", "QTNDAM" in said.upper(), False)
+    check("end-to-end: no stockist either", "Farfetch" in said, False)
+    check("end-to-end: no grading jargon",
+          "internal quality grad" in said.lower(), False)
+    check("end-to-end: and the mark is still declared", "small mark" in said, True)
+
+    # The brand blurb is generated and cached separately, so it never passes
+    # through the content generator. build_description is the net for it.
+    from src import build
+    blurbs = {"SIMONE ROCHA": "A Farfetch favourite for years. Known for tulle and pearls."}
+    text = build.build_description(
+        graded, {"condition_description": "Good condition.", "material_summary": "Silk",
+                 "item_specifics": {}},
+        CATEGORY, make_template(), blurbs)
+    check("a stockist in the brand blurb is caught too", "Farfetch" in text, False)
+    check("and the rest of the blurb survives", "tulle and pearls" in text, True)
+
+    # And the report catches anything the scrubber missed.
+    issues = run(good_row(ConditionDescription="Graded QTNDAM2 on arrival."), size="8")
+    check("a surviving code is a REVIEW",
+          any(i.kind == "REVIEW" and "internal grading" in i.message for i in issues), True)
+    issues = run(good_row(Description="Sourced from Farfetch."), size="8")
+    check("a surviving stockist is a REVIEW",
+          any(i.kind == "REVIEW" and "stockist" in i.message for i in issues), True)
+    check("a clean listing still says nothing", run(good_row(), size="8"), [])
+
+
+def test_the_app_follows_the_brand_guidelines():
+    """Brand guidelines Version 02, August 2026, plus Sammy's two renames on
+    06.09.26.
+
+    The visual layer is not otherwise covered by anything, and the file
+    labels in particular are the sort of thing that gets half-renamed: the
+    uploader says one name and the error message underneath still says the
+    old one."""
+    import ast
+    import base64
+
+    from src import branding
+
+    check("white is the canvas", branding.WHITE, "#FFFFFF")
+    check("black is the detail", branding.BLACK, "#000000")
+    check("Helvetica Neue leads the stack",
+          branding.FONT_STACK.startswith("'Helvetica Neue'"), True)
+    check("with Aileron named as the open-license fallback",
+          "Aileron" in branding.FONT_STACK, True)
+
+    logo = base64.b64decode(branding.LOGO_PNG_BASE64)
+    check("the logo is a real PNG", logo[:8], b"\x89PNG\r\n\x1a\n")
+    check("and the data URI is well formed",
+          branding.logo_data_uri().startswith("data:image/png;base64,iVBOR"), True)
+
+    app = (Path(__file__).resolve().parent.parent / "app.py").read_text()
+    ast.parse(app)  # a syntax error here takes the whole app down
+
+    # Both renames, everywhere they appear. The uploader label and the error
+    # message shown when the file is missing are different strings, and a
+    # half-done rename leaves them disagreeing.
+    for old in ("Master File(s)", "Pictures & Measurements"):
+        if old in app:
+            FAILURES.append("app.py still says " + repr(old))
+    for new_name in ("Stock Data File", "Orbitvu file"):
+        check("app.py says " + repr(new_name), new_name in app, True)
+    check("the uploader and the error message agree on Stock Data File",
+          app.count("Stock Data File") >= 2, True)
+    check("and on Orbitvu file", app.count("Orbitvu file") >= 2, True)
+
+    # Colours come from the branding module, not hard-coded into the CSS.
+    check("the app pulls its colours from branding",
+          "branding.MATRIX" in app and "branding.BLACK" in app, True)
+    check("and its logo too", "branding.logo_data_uri()" in app, True)
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

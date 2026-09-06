@@ -102,6 +102,8 @@ def check_row(
     _check_assumed_size(sku, product, row, issues)
     _check_range_size(sku, product, row, issues)
     _check_misfiled_footwear(sku, product, row, issues)
+    _check_collaboration_title(sku, row, issues)
+    _check_internal_references(sku, row, issues)
     _check_length_contradictions(sku, row, issues)
     _check_description_gaps(sku, row, issues)
 
@@ -254,6 +256,50 @@ def _check_assumed_size(sku, product, row, issues):
         issues.append(Issue(sku, "NOTE",
                             f"{_text(brand)}: {_text(raw)} -> {assumed} {_text(raw)} -> UK {uk_size}",
                             group=group))
+
+
+def _check_internal_references(sku, row, issues):
+    """Anything a buyer should never see: a stockist name, or our own
+    grading codes.
+
+    Sammy, 06.09.26. The scrubber removes these, so this check should never
+    fire — which is exactly why it is here. It fires only if the scrubber
+    missed a phrasing, and a REVIEW is right because the wording has to be
+    read by a person rather than patched blindly. 35 listings went live
+    saying "QTNDAM2" before it existed."""
+    from . import aspect_matching
+    for field in ("Title", "ConditionDescription", "Description"):
+        text = _text(row.get(field))
+        if not text:
+            continue
+        if aspect_matching._RETAILER_RE.search(text):
+            found = aspect_matching._RETAILER_RE.search(text).group(0)
+            issues.append(Issue(
+                sku, "REVIEW",
+                f"{field} names a stockist ({found}) — it must not appear in a listing"))
+        if re.search(r"QTNDAM|internal (?:quality )?grad", text, re.IGNORECASE):
+            issues.append(Issue(
+                sku, "REVIEW",
+                f"{field} still carries an internal grading reference"))
+
+
+def _check_collaboration_title(sku, row, issues):
+    """A title naming a second brand.
+
+    eBay's search manipulation policy bans "extra brand names" in a title,
+    and enforces it per brand rather than evenly: 12 collaboration titles
+    went up on 06.09.26 and exactly one was refused, the Nike one, with
+    error 240. The known-refused brands are stripped automatically
+    (aspect_matching.TITLE_BLOCKED_BRANDS); the rest are listed here so that
+    if eBay ever refuses another one, it is obvious which title to look at
+    and which brand to add to that list."""
+    title = _text(row.get("Title"))
+    if not re.search(r"\s[xX]\s", title):
+        return
+    issues.append(Issue(
+        sku, "NOTE",
+        f"{sku}: {title}",
+        group="Collaboration titles (eBay can refuse a second brand, error 240)"))
 
 
 def _check_misfiled_footwear(sku, product, row, issues):

@@ -81,6 +81,13 @@ def _sizing_sources() -> list:
         _resolve_size, _is_size_aspect,
         aspect_matching.enforce_title_size, aspect_matching.trim_title,
         aspect_matching.middle_size,
+        # Not a size, but it decides the finished title, which is
+        # cached alongside it — so a change here has to invalidate
+        # the cache exactly as a sizing change does.
+        aspect_matching.enforce_title_gender, aspect_matching.title_gender_word,
+        aspect_matching._drop_dangling_markers,
+        aspect_matching.strip_blocked_brand, aspect_matching.collaborating_brand,
+        aspect_matching.scrub_internal_references, _inspection_flag,
         aspect_matching.match_shoe_size_uk, aspect_matching.match_shoe_size_eu,
         aspect_matching.match_size, aspect_matching.size_display,
         aspect_matching.size_display_for,
@@ -369,6 +376,21 @@ def classify_aspects(
     return enum_specs, hybrid_specs, multi_specs, skipped
 
 
+def _inspection_flag(quality) -> str:
+    """What the model is told about the supplier's quality code.
+
+    Never the code itself, and never a decoded meaning, because there is no
+    key to decode it with. Only that something was flagged, so the condition
+    description can tell a buyer to look at the photos."""
+    raw = str(quality or "").strip().upper()
+    if not raw:
+        return "none"
+    if raw.startswith("QTNDAM"):
+        return ("a possible minor imperfection was flagged — describe it only in "
+                "plain buyer language, never as a grade, code or internal process")
+    return "none"
+
+
 def _condition_rubric(category: ebay_template.CategorySpec) -> str:
     lines = [f"  {cid} = {label}" for cid, label in category.conditions]
     return (
@@ -413,7 +435,12 @@ def _product_brief(product: Product, size_for_title: str | None = None) -> str:
         f"Composition/Material (raw, may be messy): "
         f"{m.get('Composition') or meas.get('Material') or '(not recorded)'}",
         f"Country of Origin (raw): {m.get('Country of Origin')}",
-        f"Internal quality grade: {m.get('Quality')}",
+        # The raw grade used to go in here, and the model dutifully wrote
+        # about it: "QTNDAM2" reached 35 buyer-facing descriptions on
+        # 06.09.26. The codes have no decode key, so nobody can say what
+        # QTNDAM2 means, and the SOP's standing instruction is to ignore
+        # them. What survives is the one thing a buyer needs from it.
+        f"Supplier inspection flag: {_inspection_flag(m.get('Quality'))}",
         f"Condition notes (from inspection): {meas.get('Description') or '(none given)'}",
         f"RRP: {m.get('Rounded RRP')}",
         f"Measurements (inches) - Pit to Pit: {meas.get('Pit to Pit (inches)') or 'n/a'}, "
@@ -557,6 +584,9 @@ for a product in the eBay category "{category.category_name}" (ID {category.cate
 2. {_condition_rubric(category)}
 3. Write a short ConditionDescription (buyer-facing, plain language version of
    any condition notes given; if none given and condition is New, say so briefly).
+   Never mention internal processes: no grades, no grading codes, no "internal
+   quality grade", no SKU. Never name the retailer or department store the
+   stock came from. Say what the item is like, not how we categorised it.
    Vary your sentence opening and structure — this is one of many listings from
    the same seller, so don't default to starting every one with "Preloved, ..."
    or reusing the same phrase pattern each time.
@@ -657,6 +687,38 @@ def generate_for_product(
     # brand casing above.
     result["title"] = aspect_matching.enforce_title_size(result.get("title", ""), size_for_title)
 
+    # Mens / Womens straight after the brand, for eBay search. Sammy,
+    # 06.09.26. Read from the Master File's Gender, the same column
+    # C:Department is resolved from, so the title and the item specific can
+    # never disagree about who the item is for. Unisex gets nothing, her
+    # decision the same day.
+    result["title"] = aspect_matching.enforce_title_gender(
+        result.get("title", ""), product.master.get("Gender"), brand=brand_raw)
+
+    # A brand eBay refuses to see in someone else's title. Error 240 on
+    # 06.09.26 blocked one listing outright: "COMME DES GARCON HOMME PLUS x
+    # Nike Air Max TL2.5". The collaborating brand moves to the description,
+    # which eBay's own policy explicitly permits.
+    result["title"] = aspect_matching.strip_blocked_brand(
+        result.get("title", ""), brand_raw)
+
+    # The prompt above asks for none of this. The prompt is not a guarantee —
+    # the same is true of the brand casing and the size — so internal grading
+    # language and stockist names are stripped here regardless of what came
+    # back. If scrubbing empties the condition description entirely, it falls
+    # back to the plain condition label rather than shipping a blank.
+    scrubbed = aspect_matching.scrub_internal_references(
+        result.get("condition_description"))
+    if not scrubbed.strip():
+        label = next((lbl for cid, lbl in category.conditions
+                      if str(cid) == str(result.get("condition_id"))), None)
+        scrubbed = f"{label}." if label else ""
+    result["condition_description"] = scrubbed
+    result["title"] = aspect_matching.scrub_internal_references(result.get("title", ""))
+
+    # Last, so it measures the finished title. The gender word sits at the
+    # front, next to the brand, and trim drops from the middle, so it
+    # survives along with the size and the RRP.
     result["title"] = aspect_matching.trim_title(
         result.get("title", ""), size_for_title, limit=80)
 

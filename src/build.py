@@ -35,6 +35,11 @@ from pathlib import Path
 # before this was added.
 EXTRA_COLUMNS = ["OriginalRetailPrice", "ConditionDescription", "C:Country of Origin"]
 
+# The one condition eBay refuses a ConditionDescription for. 1500 ("New
+# without box") and 1750 ("New with defects") accept one and did not warn,
+# so this is deliberately a single value rather than "anything new".
+CONDITION_NO_DESCRIPTION = 1000
+
 from . import aspect_matching, config, ebay_template
 from .data_loader import Product, split_image_urls
 
@@ -149,7 +154,11 @@ def build_description(
     # show up in the CSV/spreadsheet, never on eBay itself. <br> forces a
     # real visible break there; keeping "\n" alongside it just makes the
     # raw text still readable if someone opens the file directly.
-    return "<br>\n".join(lines)
+    # Final net. The condition text is already scrubbed upstream, but the
+    # brand blurb is generated and cached separately (brand_blurb.py), so a
+    # stockist name written into a blurb would otherwise reach the listing
+    # without ever passing through the content generator.
+    return aspect_matching.scrub_internal_references("<br>\n".join(lines))
 
 
 def compute_start_price(rrp, price_percent: float) -> float | None:
@@ -191,7 +200,15 @@ def build_row(
         "Quantity": m.get("Qty") or config.QUANTITY_DEFAULT,
         "Item photo URL": "|".join(pic_urls),
         "Condition ID": ai_result.get("condition_id"),
-        "ConditionDescription": ai_result.get("condition_description"),
+        # eBay ignores ConditionDescription on condition 1000 ("New with
+        # box") and returns warning 21919111 for every such row: 32 of 282 on
+        # 06.09.26, which is a third of the warnings in the results file and
+        # makes a real one harder to see. Nothing is lost by omitting it —
+        # the same text is already a "Condition:" line in the description
+        # body, which is what a buyer actually reads.
+        "ConditionDescription": (
+            None if str(ai_result.get("condition_id")) == str(CONDITION_NO_DESCRIPTION)
+            else ai_result.get("condition_description")),
         "Description": build_description(product, ai_result, category, template, blurb_cache),
         "Format": config.FORMAT,
         "Duration": config.DURATION,

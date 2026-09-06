@@ -17,7 +17,7 @@ import openpyxl
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from src import config, ebay_template, pipeline  # noqa: E402
+from src import branding, config, ebay_template, pipeline  # noqa: E402
 
 APP_DIR = Path(__file__).resolve().parent
 CACHE_DIR = APP_DIR / "cache"
@@ -25,90 +25,178 @@ OUTPUT_DIR = APP_DIR / "output"
 
 st.set_page_config(page_title="Preamato Listing Helper", page_icon="⬛", layout="centered")
 
+BRAND_CSS = f"""
+<style>
+/* Brand guidelines, Version 02, August 2026. White is the canvas, black is
+   the detail, 95/5 and deliberately not a 50/50 split. Matrix green is a
+   hover state only, never a fill, so the ratio survives. */
+:root {{
+    --ink: {branding.BLACK};
+    --canvas: {branding.WHITE};
+    --rule: {branding.RULE};
+    --muted: {branding.MUTED};
+    --matrix: {branding.MATRIX};
+    --matrix-ink: {branding.MATRIX_INK};
+}}
+
+/* No webfont is loaded on purpose. Helvetica Neue is installed on every Mac
+   here, so the brand's first choice renders natively and the app does not
+   wait on a font download to paint. */
+html, body, [class*="css"], .stApp, button, input, textarea, select {{
+    font-family: {branding.FONT_STACK} !important;
+    -webkit-font-smoothing: antialiased;
+}}
+
+.stApp {{ background: var(--canvas); }}
+
+/* Header ------------------------------------------------------------- */
+.preamato-logo {{
+    margin: 0.25rem 0 0.5rem 0;
+}}
+.preamato-logo img {{
+    width: 208px;
+    height: auto;
+    display: block;
+}}
+.preamato-subtitle {{
+    font-size: 0.72rem;
+    font-weight: 500;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.22em;
+    margin-bottom: 1.6rem;
+}}
+
+/* Section headings. Uppercase and letter-spacing carry the cue, on a
+   hairline rule rather than the 2px bar this used to have. */
+h2, h3 {{
+    font-weight: 700 !important;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    font-size: 0.78rem !important;
+    color: var(--ink) !important;
+    border-bottom: 1px solid var(--ink);
+    padding-bottom: 0.55rem;
+    margin-top: 2.25rem !important;
+}}
+
+/* Anything clickable turns matrix green under the cursor ---------------- */
+.stButton > button, .stDownloadButton > button {{
+    border-radius: 0 !important;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    font-weight: 700 !important;
+    font-size: 0.78rem !important;
+    border: 1.5px solid var(--ink) !important;
+    background-color: var(--ink) !important;
+    color: var(--canvas) !important;
+    transition: background-color 90ms linear, border-color 90ms linear, color 90ms linear;
+}}
+.stButton > button:hover, .stDownloadButton > button:hover,
+.stButton > button:focus:hover, .stDownloadButton > button:focus:hover {{
+    background-color: var(--matrix) !important;
+    border-color: var(--matrix) !important;
+    color: var(--ink) !important;
+}}
+.stButton > button:active, .stDownloadButton > button:active {{
+    background-color: var(--matrix-ink) !important;
+    border-color: var(--matrix-ink) !important;
+    color: var(--canvas) !important;
+}}
+
+/* File uploaders */
+[data-testid="stFileUploaderDropzone"] {{
+    border-radius: 0 !important;
+    border: 1px dashed var(--ink) !important;
+    background-color: var(--canvas) !important;
+    transition: border-color 90ms linear;
+}}
+[data-testid="stFileUploaderDropzone"]:hover {{
+    border-color: var(--matrix-ink) !important;
+}}
+[data-testid="stFileUploaderDropzone"] button {{
+    border-radius: 0 !important;
+    border: 1.5px solid var(--ink) !important;
+    background-color: var(--canvas) !important;
+    color: var(--ink) !important;
+    font-weight: 700 !important;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    transition: background-color 90ms linear, border-color 90ms linear;
+}}
+[data-testid="stFileUploaderDropzone"] button:hover {{
+    background-color: var(--matrix) !important;
+    border-color: var(--matrix) !important;
+    color: var(--ink) !important;
+}}
+
+/* Every icon that is actually clickable: the uploader's cloud, the remove
+   X on an uploaded file, the download arrow, the expander chevron, the
+   little help question marks. Streamlit draws them all as inline SVG. */
+[data-testid="stFileUploaderDropzone"]:hover svg,
+[data-testid="stFileUploaderDeleteBtn"]:hover svg,
+[data-testid="stExpander"] summary:hover svg,
+[data-testid="stTooltipIcon"]:hover svg,
+[data-testid="stHeaderActionElements"] button:hover svg,
+button:hover svg, a:hover svg, summary:hover svg {{
+    fill: var(--matrix-ink) !important;
+    color: var(--matrix-ink) !important;
+    stroke: var(--matrix-ink) !important;
+}}
+[data-testid="stFileUploaderDropzone"] button:hover svg {{
+    fill: var(--ink) !important;
+    color: var(--ink) !important;
+    stroke: var(--ink) !important;
+}}
+
+/* Expanders, links, and the checkbox */
+[data-testid="stExpander"] details {{
+    border: 1px solid var(--rule) !important;
+    border-radius: 0 !important;
+}}
+[data-testid="stExpander"] summary {{
+    transition: color 90ms linear;
+}}
+[data-testid="stExpander"] summary:hover {{
+    color: var(--matrix-ink) !important;
+}}
+a, a:visited {{ color: var(--ink); text-decoration: underline; }}
+a:hover {{ color: var(--matrix-ink) !important; }}
+
+[data-testid="stCheckbox"]:hover [data-baseweb="checkbox"] div:first-child {{
+    border-color: var(--matrix-ink) !important;
+}}
+
+/* Sliders. The handle is a control you drag, so it gets the same treatment. */
+[data-testid="stSlider"] [role="slider"] {{
+    transition: background-color 90ms linear, box-shadow 90ms linear;
+}}
+[data-testid="stSlider"]:hover [role="slider"] {{
+    background-color: var(--matrix) !important;
+    box-shadow: 0 0 0 1px var(--ink) !important;
+}}
+
+/* The progress bar is not clickable, so it stays black. */
+.stProgress > div > div > div {{ background-color: var(--ink) !important; }}
+
+[data-testid="stCheckbox"] label p, .stSlider label p,
+.stNumberInput label p, .stTextInput label p,
+[data-testid="stFileUploader"] label p {{
+    font-weight: 500 !important;
+    letter-spacing: 0.01em;
+}}
+</style>
+"""
+
+st.markdown(BRAND_CSS, unsafe_allow_html=True)
+
 st.markdown(
-    """
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Archivo+Black&family=Inter:wght@400;500;600;700;800&display=swap');
-
-    html, body, [class*="css"] {
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-    }
-
-    .preamato-logo {
-        font-family: 'Archivo Black', 'Inter', sans-serif;
-        font-weight: 900;
-        font-size: 2.75rem;
-        letter-spacing: -0.02em;
-        color: #000000;
-        line-height: 1;
-        margin-bottom: 0.3rem;
-    }
-    .preamato-subtitle {
-        font-family: 'Inter', sans-serif;
-        font-size: 0.8rem;
-        font-weight: 600;
-        color: #555555;
-        text-transform: uppercase;
-        letter-spacing: 0.18em;
-        margin-bottom: 1.75rem;
-    }
-
-    h2, h3 {
-        font-family: 'Inter', sans-serif !important;
-        font-weight: 700 !important;
-        text-transform: uppercase;
-        letter-spacing: 0.06em;
-        font-size: 0.9rem !important;
-        color: #000 !important;
-        border-bottom: 2px solid #000;
-        padding-bottom: 0.5rem;
-        margin-top: 2rem !important;
-    }
-
-    .stButton > button, .stDownloadButton > button {
-        border-radius: 0 !important;
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-        font-weight: 700 !important;
-        border: 2px solid #000 !important;
-        background-color: #000 !important;
-        color: #fff !important;
-    }
-    .stButton > button:hover, .stDownloadButton > button:hover {
-        background-color: #333 !important;
-        border-color: #333 !important;
-        color: #fff !important;
-    }
-
-    [data-testid="stFileUploaderDropzone"] {
-        border-radius: 0 !important;
-        border: 1.5px dashed #000 !important;
-        background-color: #fafafa !important;
-    }
-    [data-testid="stFileUploaderDropzone"] button {
-        border-radius: 0 !important;
-        border: 1.5px solid #000 !important;
-        background-color: #fff !important;
-        color: #000 !important;
-        font-weight: 700 !important;
-    }
-
-    .stProgress > div > div > div {
-        background-color: #000 !important;
-    }
-
-    [data-testid="stCheckbox"] label p, .stSlider label p, .stNumberInput label p, .stTextInput label p {
-        font-weight: 500 !important;
-    }
-    </style>
-    """,
+    f'<div class="preamato-logo"><img src="{branding.logo_data_uri()}" alt="PREAMATO"></div>',
     unsafe_allow_html=True,
 )
-
-st.markdown('<div class="preamato-logo">PREAMATO</div>', unsafe_allow_html=True)
 st.markdown('<div class="preamato-subtitle">Listing Helper</div>', unsafe_allow_html=True)
 st.caption(
-    "Combines your Master File, product photos/measurements, and eBay's category list into "
+    "Combines your Stock Data File, the Orbitvu file, and eBay's category list into "
     "a ready-to-upload eBay listing spreadsheet — with AI-written titles, descriptions, and "
     "item specifics."
 )
@@ -145,7 +233,7 @@ st.subheader("2. Upload your files")
 col1, col2 = st.columns(2)
 with col1:
     master_files = st.file_uploader(
-        "Master File(s) (.xlsx)", type=["xlsx"], accept_multiple_files=True,
+        "Stock Data File (.xlsx)", type=["xlsx"], accept_multiple_files=True,
         help="Multiple files are merged — e.g. separate exports per supplier batch.",
     )
     template_files = st.file_uploader(
@@ -168,7 +256,7 @@ with col1:
         st.caption("No manual template uploaded — using the full department template set (menswear/womenswear clothing, shoes, accessories, jewellery & watches, homeware, kidswear).")
 with col2:
     measurements_files = st.file_uploader(
-        "Pictures & Measurements (.csv)", type=["csv"], accept_multiple_files=True,
+        "Orbitvu file (.csv)", type=["csv"], accept_multiple_files=True,
         help="Multiple files are merged — e.g. separate exports per photography batch.",
     )
 
@@ -246,9 +334,9 @@ if run_clicked:
     if not api_key:
         problems.append("Enter your Anthropic API key.")
     if not master_files:
-        problems.append("Upload at least one Master File.")
+        problems.append("Upload at least one Stock Data File.")
     if not measurements_files:
-        problems.append("Upload at least one Pictures & Measurements file.")
+        problems.append("Upload at least one Orbitvu file.")
     if schedule_enabled and schedule_invalid:
         problems.append("Scheduled start must be in the future.")
 

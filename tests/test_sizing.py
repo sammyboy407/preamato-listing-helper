@@ -616,7 +616,17 @@ def test_an_over_long_title_keeps_its_size_end_to_end():
     check("end-to-end: the title fits eBay's limit", len(title) <= 80, True)
     check("end-to-end: and it still carries the size", "UK 7.5" in title, True)
     check("end-to-end: and it does not end mid-word",
-          all(w in long_title.split() or w.isupper() for w in title.split()), True)
+          all(w in long_title.split() or w.isupper() or w == "Mens"
+              for w in title.split()), True)
+    # The gender word is added in the same stretch of code, so this is also
+    # where a dropped call site shows up. The product is MEN.
+    check("end-to-end: and it says who the item is for", "Mens" in title, True)
+    # The same stretch of code strips a brand eBay refuses in someone else's
+    # title. The fake AI title above is the real refused one, CDG x Nike.
+    check("end-to-end: the blocked second brand is gone", "Nike" in title, False)
+    check("end-to-end: but the model name survives", "Air Max" in title, True)
+    check("end-to-end: right after the brand",
+          title.startswith("COMME DES GARCON HOMME PLUS Mens"), True)
 
 
 def test_one_size_string_feeds_title_description_and_checks():
@@ -801,6 +811,11 @@ def test_changing_a_sizing_rule_invalidates_the_cache():
         # Added 06.09.26; mutation testing showed it could drop out of the
         # list with every check still green, same as trim_title before it.
         "middle_size",
+        # Not sizes, but they decide the finished title, which is cached
+        # alongside the size — so a change to either has to invalidate the
+        # cache exactly as a sizing change does. Added 06.09.26.
+        "enforce_title_gender", "title_gender_word", "_drop_dangling_markers",
+        "strip_blocked_brand", "collaborating_brand",
     }
     missing = sorted(must_be_hashed - hashed)
     if missing:
@@ -852,6 +867,142 @@ def test_a_size_range_leaves_no_orphan_in_the_title():
             FAILURES.append(f"orphan range end left in title: {out!r}")
         if out.count(size) != 1:
             FAILURES.append(f"size should appear exactly once, got {out!r}")
+
+
+def test_a_second_brand_is_stripped_from_the_title():
+    """eBay error 240, 06.09.26. "COMME DES GARCON HOMME PLUS x Nike Air Max
+    TL2.5 Sneaker Black UK 7.5 RRP 395" was refused outright under the search
+    manipulation policy: extra brand names are not allowed in a title.
+
+    Enforcement is per brand, not even. Eleven other collaboration titles in
+    the same upload listed without complaint — adidas x Wales Bonner, CDG x
+    New Balance, CDG SHIRT x ASICS, MM6 x Salomon, RICK OWENS DRKSHDW x
+    Converse and the rest. So TITLE_BLOCKED_BRANDS holds brands actually
+    observed being refused, and these checks are as much about what must NOT
+    be stripped as what must."""
+    refused = "COMME DES GARCON HOMME PLUS x Nike Air Max TL2.5 Sneaker Black UK 7.5 RRP 395"
+    out = am.strip_blocked_brand(refused, "COMME DES GARCON HOMME PLUS")
+    check("the blocked brand goes", "Nike" in out, False)
+    check("and the x that joined it", " x " in out, False)
+    check("the rest of the model name stays", "Air Max TL2.5" in out, True)
+    check("the item's own brand stays", out.startswith("COMME DES GARCON HOMME PLUS"), True)
+    check("and so do the size and the RRP", "UK 7.5" in out and "RRP 395" in out, True)
+    check("no double spaces left behind", "  " in out, False)
+
+    # A brand that has never been refused is left alone. Stripping these
+    # would cost real search traffic for no reason.
+    for title in [
+        "ADIDAS X WALES BONNER Mens WB SL76 Sneaker Blue Suede UK 8 RRP 195",
+        "COMME DES GARCON HOMME PLUS Mens x New Balance U509 Sneaker Grey EU 41.5 RRP 245",
+        "MM6 MAISON MARGIELA X Salomon XT-4 Mule Blue White Sneaker UK 3.5 RRP 295",
+        "RICK OWENS DRKSHDW Womens x Converse Turbowpn OX Black Leather UK 4.5 RRP 195",
+        "CDG COMME DES GARCONS SHIRT Mens x ASICS GEL-KAYANO 14 White UK 8 RRP 495",
+    ]:
+        check(f"left alone: {title.split()[0]}",
+              am.strip_blocked_brand(title, title.split()[0]), title)
+
+    # A Nike listing keeps its own name. The rule is "someone else's brand",
+    # not "this word".
+    own = "NIKE Mens Air Max 90 Sneaker White Leather UK 9 RRP 130"
+    check("Nike's own listing is untouched", am.strip_blocked_brand(own, "Nike"), own)
+    check("and nothing is flagged on it", am.collaborating_brand(own, "Nike"), None)
+    check("the collaborating brand is named for the report",
+          am.collaborating_brand(refused, "COMME DES GARCON HOMME PLUS"), "NIKE")
+
+
+def test_the_title_says_who_the_item_is_for():
+    """Sammy, 06.09.26: "we need to add Mens Womens after each brand in the
+    title, this is optimal for ebay search results".
+
+    After the brand, not on the end, because eBay weights the front of a
+    title. Read from the Master File's Gender, the same column C:Department
+    comes from, so the title and the specific cannot disagree."""
+    check("womens goes straight after the brand",
+          am.enforce_title_gender("TORY BURCH Eleanor Ballet Flat Black RRP 395", "WOMEN",
+                                  brand="Tory Burch"),
+          "TORY BURCH Womens Eleanor Ballet Flat Black RRP 395")
+    check("and mens",
+          am.enforce_title_gender("GH BASS Weejun Larson Loafer Brown EU 44 RRP 245", "MEN",
+                                  brand="GH BASS"),
+          "GH BASS Mens Weejun Larson Loafer Brown EU 44 RRP 245")
+
+    # Unisex gets nothing. Sammy's decision the same day: 14 items in the
+    # first batch, and a wrong word costs more than a missing one.
+    for department in ("Unisex Adults", "UNISEX", "GIRL", "Teens", "", None):
+        title = "SALOMON XT-6 Trainer Black UK 8 RRP 195"
+        check(f"{department!r} gets no word", am.enforce_title_gender(title, department,
+                                                                     brand="Salomon"), title)
+
+    # 17 of 282 titles in the first batch already said it. Two gender words
+    # in one title reads as a mistake.
+    for existing in [
+        "BURBERRY Rogue Loafer Black Calf Leather Men's Shoes EU 44 RRP 695",
+        "DIEMME Cornaro Low Top Hiking Boot Green Leather Mens EU 46 RRP 395",
+        "SOME BRAND Unisex Trainer White UK 8 RRP 100",
+    ]:
+        check("no second gender word is added",
+              am.enforce_title_gender(existing, "MEN", brand=existing.split()[0]), existing)
+
+    # HOMME is part of a brand name, not a gender word. Treating it as one
+    # would silently skip every Comme des Garcons Homme Plus listing.
+    out = am.enforce_title_gender(
+        "COMME DES GARCON HOMME PLUS x Nike Air Max Sneaker Black UK 7.5 RRP 395",
+        "MEN", brand="COMME DES GARCON HOMME PLUS")
+    check("a brand containing HOMME still gets the word", "PLUS Mens x Nike" in out, True)
+
+    # With the brand missing from the title the word still has to appear.
+    check("no brand in the title puts the word at the front",
+          am.enforce_title_gender("Eleanor Ballet Flat Black RRP 395", "WOMEN", brand="Tory Burch"),
+          "Womens Eleanor Ballet Flat Black RRP 395")
+    check("and no brand given at all",
+          am.enforce_title_gender("Eleanor Ballet Flat Black RRP 395", "WOMEN"),
+          "Womens Eleanor Ballet Flat Black RRP 395")
+
+    # The word survives trimming, along with the brand, the size and the RRP.
+    # 23 of 282 titles went over 80 once the word was added.
+    long_title = am.enforce_title_gender(
+        "JACQUEMUS Les Ballerines Ovalo Leather Ballet Flats Multicoloured EU 40 RRP 545",
+        "WOMEN", brand="JACQUEMUS")
+    trimmed = am.trim_title(long_title, "EU 40")
+    check("a trimmed title still fits", len(trimmed) <= 80, True)
+    check("and keeps the gender word", "Womens" in trimmed, True)
+    check("and the brand", trimmed.startswith("JACQUEMUS Womens"), True)
+    check("and the size", "EU 40" in trimmed, True)
+    check("and the RRP", "RRP 545" in trimmed, True)
+
+
+def test_a_stranded_size_marker_is_cleaned_up():
+    """Two real titles from the first batch, 06.09.26.
+
+    The AI wrote "UK Size" on a shoe whose recorded size was EU. Stripping
+    its size mention left those two words stranded in front of the correct
+    one, so the title read "...Choc Brown Leather UK Size EU 44 RRP 245".
+    Nothing was wrong enough to fail a check, and it only became visible when
+    the trimmer had to make room and dropped "Size", leaving "UK EU 44"."""
+    check("a stranded marker before the real size goes",
+          am.enforce_title_size(
+              "GH BASS Weejun Larson Moc Penny Loafer Choc Brown Leather UK Size RRP 245",
+              "EU 44"),
+          "GH BASS Weejun Larson Moc Penny Loafer Choc Brown Leather EU 44 RRP 245")
+    check("and a chain of them",
+          am._drop_dangling_markers("BRAND Shoe Brown UK Size EU 44 RRP 245"),
+          "BRAND Shoe Brown EU 44 RRP 245")
+
+    # It must not eat a marker that has its own number, or ordinary words.
+    for untouched in [
+        "BRAND Shoe Brown EU 44 RRP 245",
+        "BRAND US Polo Shoe Brown EU 44 RRP 245",
+        "BRAND Shoe Size Brown EU 44 RRP 245",
+    ]:
+        check(f"leaves {untouched!r} alone", am._drop_dangling_markers(untouched), untouched)
+
+    # RRP with no space still reads as the RRP tail, so the trimmer keeps it
+    # instead of dropping it as an ordinary word. One GH Bass title, 06.09.26.
+    long_one = ("GH BASS Mens Weejun Heritage Larson Moc Penny Loafer Choc Brown "
+                "Leather RRP245 EU 45")
+    out = am.trim_title(long_one, "EU 45")
+    check("RRP245 survives trimming", "RRP245" in out, True)
+    check("and the title fits", len(out) <= 80, True)
 
 
 def test_an_over_long_title_keeps_its_size():

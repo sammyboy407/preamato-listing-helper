@@ -620,7 +620,30 @@ _TITLE_SIZE_RE = re.compile(
     r"|(?:[2-9]?X{0,3}[SML]|One\s+Size)\b)",
     re.IGNORECASE,
 )
-_TITLE_RRP_RE = re.compile(r"\bRRP\b.*$", re.IGNORECASE)
+# "RRP" not followed by a letter, so "RRP 245" and "RRP245" both count. The
+# \bRRP\b form missed "RRP245" (one GH Bass title, 06.09.26), so the trimmer
+# did not know that was the RRP tail, and dropped it to make room.
+_TITLE_RRP_RE = re.compile(r"\bRRP(?![A-Za-z]).*$", re.IGNORECASE)
+
+# A size marker with no number on it, sitting immediately before another size
+# marker. "GH BASS Weejun Loafer Brown Leather UK Size EU 44 RRP 245": the AI
+# wrote "UK Size", the real size was EU, and stripping the AI's size left the
+# words "UK Size" stranded in front of the correct one. Applied repeatedly,
+# so a chain collapses: "UK Size EU 44" -> "Size EU 44" -> "EU 44".
+_DANGLING_MARKER_RE = re.compile(
+    r"\b(?:UK|EU|EUR|US|USA|IT|FR|JP|Size|Sz)\b"
+    r"(?=\s+(?:UK|EU|EUR|US|USA|IT|FR|JP|Size|Sz)\b)",
+    re.IGNORECASE)
+
+
+def _drop_dangling_markers(title: str) -> str:
+    for _ in range(4):
+        cleaned = _DANGLING_MARKER_RE.sub("", title)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+        if cleaned == title:
+            return title
+        title = cleaned
+    return title
 
 
 def enforce_title_size(title: str, size_for_display: str | None) -> str:
@@ -650,8 +673,199 @@ def enforce_title_size(title: str, size_for_display: str | None) -> str:
     rrp = _TITLE_RRP_RE.search(cleaned)
     if rrp:
         head = cleaned[: rrp.start()].rstrip()
-        return f"{head} {size_for_display} {rrp.group(0)}".strip()
-    return f"{cleaned} {size_for_display}".strip()
+        return _drop_dangling_markers(f"{head} {size_for_display} {rrp.group(0)}".strip())
+    return _drop_dangling_markers(f"{cleaned} {size_for_display}".strip())
+
+
+# Words that already tell a buyer who the item is for. If any of these is
+# already in the title, no second one is added. "HOMME" is deliberately NOT
+# here: it appears inside the brand COMME DES GARCON HOMME PLUS, and treating
+# it as a gender word would silently skip those listings.
+_TITLE_GENDER_RE = re.compile(
+    r"\b(?:mens|men's|womens|women's|ladies|gents|unisex|boys|girls|kids)\b",
+    re.IGNORECASE)
+
+# Master File Gender / eBay Department -> the word that goes in the title.
+# Sammy, 06.09.26: "we need to add Mens Womens after each brand in the title,
+# this is optimal for ebay search results". Unisex gets nothing, by her
+# decision the same day: 14 items in the first batch, and a wrong word costs
+# more than a missing one.
+TITLE_GENDER_WORDS = {
+    "MEN": "Mens",
+    "MENS": "Mens",
+    "WOMEN": "Womens",
+    "WOMENS": "Womens",
+}
+
+
+def title_gender_word(department) -> str | None:
+    return TITLE_GENDER_WORDS.get(" ".join(str(department or "").strip().upper().split()))
+
+
+# Stockists and department stores. Sammy, 06.09.26: no reference to any of
+# these in a listing. Where the stock came from is nobody's business but ours,
+# and naming a retailer on a resale listing invites questions we do not want
+# to answer.
+#
+# A sentence naming one of these is removed whole, because "bought from
+# Browns" cannot be neutralised word by word. "Browns" needs the plural: the
+# colour "Brown" appears in a third of these listings.
+BLOCKED_RETAILERS = [
+    r"Browns", r"Farfetch", r"Far Fetch", r"Selfridges", r"Harrods",
+    r"Net-?a-?Porter", r"Matches\s?Fashion", r"Mytheresa", r"SSENSE",
+    r"Harvey Nichols", r"Dover Street Market", r"Flannels", r"Bergdorf",
+    r"Saks", r"Neiman Marcus", r"Nordstrom", r"Bloomingdale'?s",
+    r"department store", r"concession",
+]
+_RETAILER_RE = re.compile(r"\b(?:" + "|".join(BLOCKED_RETAILERS) + r")\b", re.IGNORECASE)
+
+# Internal grading language and codes. Sammy, 06.09.26: "leave out the
+# QTNDAM2 references from condition descriptions and the listings", which is
+# the same instruction already in the bulk upload SOP — the codes have no
+# decode key, so nobody can say what QTNDAM2 actually means, and writing
+# "minor factory defect" from an undecoded code states a guess to a buyer as
+# fact.
+#
+# The code and the jargon go. What the item is actually like stays, because
+# that is what stops a "not as described" case.
+_INTERNAL_REWRITES = [
+    # The bracketed code, with or without the words around it.
+    (re.compile(r"\s*\([^()]*QTNDAM[^()]*\)", re.IGNORECASE), ""),
+    (re.compile(r"\s*\(\s*(?:quality\s+)?grade[^()]*\)", re.IGNORECASE), ""),
+    (re.compile(r"\bQTNDAM\s*\d*\b", re.IGNORECASE), ""),
+    # The SKU itself, which is on the label and not for the description.
+    (re.compile(r"\bQTN\d{2}[-\s]\d{3}[-\s]\d{3}\b", re.IGNORECASE), ""),
+    # The jargon, rewritten rather than deleted, so the sentence survives and
+    # the buyer keeps the warning.
+    (re.compile(r"\b(?:our|the|its)?\s*internal quality grad(?:e|ing)\b", re.IGNORECASE),
+     "our inspection"),
+    (re.compile(r"\b(?:our|the|its)?\s*internal grad(?:e|ing)\b", re.IGNORECASE),
+     "our inspection"),
+    (re.compile(r"\bper our (?:internal )?(?:quality )?grading\b", re.IGNORECASE),
+     "on inspection"),
+    (re.compile(r"\b(?:quality )?grading code\b", re.IGNORECASE), "inspection"),
+    (re.compile(r'\bthat fall outside standard\s+"?new"?\s+grading\b', re.IGNORECASE), ""),
+    (re.compile(r"\binternal (?:quality )?grade\b", re.IGNORECASE), "our inspection"),
+]
+
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+
+def scrub_internal_references(text) -> str:
+    """Removes anything a buyer should never see: stockist names and internal
+    grading codes.
+
+    Two different treatments, deliberately. A retailer name takes its whole
+    sentence with it, because there is no way to neutralise "originally from
+    Browns" a word at a time. Internal grading language is rewritten instead,
+    so "the internal quality grade indicates a minor factory defect" becomes
+    "our inspection indicates a minor factory defect" — the jargon goes, the
+    warning stays. Deleting that sentence would leave a defective item
+    described as flawless, which is a worse outcome than the jargon."""
+    text = str(text or "")
+    if not text.strip():
+        return text
+
+    for pattern, replacement in _INTERNAL_REWRITES:
+        text = pattern.sub(replacement, text)
+
+    if _RETAILER_RE.search(text):
+        kept = [s for s in _SENTENCE_SPLIT.split(text) if not _RETAILER_RE.search(s)]
+        text = " ".join(kept)
+
+    # Tidy up after the surgery.
+    text = re.sub(r"\s+([,.;:])", r"\1", text)
+    text = re.sub(r"([,;:])\s*\.", ".", text)
+    text = re.sub(r"\.\s*\.+", ".", text)
+    text = re.sub(r"\s{2,}", " ", text).strip()
+    text = re.sub(r"^(?:but|however|though|although|and|so)\b[\s,]*", "", text,
+                  flags=re.IGNORECASE)
+    # A rewrite can land mid-sentence and leave "... worn. our inspection
+    # notes ...". Only the words this function introduces are re-capitalised,
+    # so an intentional lower-case word like "eBay" is never touched.
+    text = re.sub(r"(^|(?<=[.!?])\s+)(our|on|inspection)\b",
+                  lambda m: m.group(1) + m.group(2).capitalize(), text)
+    return text[:1].upper() + text[1:] if text else text
+
+
+# Brands eBay refuses to see in a title that is not their own listing.
+#
+# eBay's search manipulation policy bans "extra brand names" in a title. In
+# practice it is enforced per brand, not evenly: of 12 collaboration titles in
+# the 05.09.26 batch, adidas x Wales Bonner, adidas x Dingyun Zhang, CDG x New
+# Balance, CDG SHIRT x ASICS, MM6 x Salomon, NEW BALANCE CDG, ON RUNNING x FKA
+# Twigs and RICK OWENS DRKSHDW x Converse all listed without complaint, and
+# only "COMME DES GARCON HOMME PLUS x Nike Air Max TL2.5" was refused, with
+# error 240.
+#
+# So this is a list of brands actually observed being refused on this account,
+# not a guess at eBay's rules, and it grows the same way US_SIZED_BRANDS does:
+# by evidence. The collaborating brand is not lost, it moves to the
+# description, which the policy explicitly allows.
+TITLE_BLOCKED_BRANDS = {
+    "NIKE",
+}
+
+# The joiner in a collaboration title: "CDG x Nike", "MM6 X Salomon".
+_COLLAB_JOINER = r"(?:\s+[xX]\s+)"
+
+
+def collaborating_brand(title: str, own_brand=None) -> str | None:
+    """The blocked brand named in a title that is not the item's own.
+    Returns None when there is nothing to strip."""
+    own = _normalise_brand(own_brand)
+    for blocked in sorted(TITLE_BLOCKED_BRANDS):
+        if blocked in own:
+            continue
+        if re.search(rf"\b{re.escape(blocked)}\b", title or "", flags=re.IGNORECASE):
+            return blocked
+    return None
+
+
+def strip_blocked_brand(title: str, own_brand=None) -> str:
+    """Removes a brand eBay will not accept in someone else's title, along
+    with the "x" that joined it on.
+
+    "COMME DES GARCON HOMME PLUS x Nike Air Max TL2.5 Sneaker Black" becomes
+    "COMME DES GARCON HOMME PLUS Air Max TL2.5 Sneaker Black". The brand is
+    dropped, the rest of the model name is kept, and the listing goes live
+    instead of being refused."""
+    blocked = collaborating_brand(title, own_brand)
+    if not blocked:
+        return title
+    cleaned = re.sub(rf"{_COLLAB_JOINER}{re.escape(blocked)}\b", " ", title, flags=re.IGNORECASE)
+    if cleaned == title:
+        cleaned = re.sub(rf"\b{re.escape(blocked)}\b{_COLLAB_JOINER}", " ", title, flags=re.IGNORECASE)
+    if cleaned == title:
+        cleaned = re.sub(rf"\b{re.escape(blocked)}\b", " ", title, flags=re.IGNORECASE)
+    return re.sub(r"\s{2,}", " ", cleaned).strip()
+
+
+def enforce_title_gender(title: str, department, brand=None) -> str:
+    """Puts Mens or Womens straight after the brand.
+
+    Not appended on the end, because eBay weights the front of a title and
+    because a buyer scanning a results page reads the first few words. Not
+    added at all when the title already says who it is for, which 17 of 282
+    did in the first batch ("BURBERRY Rogue Loafer Black Calf Leather Men's
+    Shoes EU 44"), since two gender words in one title reads as a mistake.
+
+    The brand is found case-insensitively and the word goes after it. With no
+    brand in the title the word goes at the front, which is where the brand
+    would have been."""
+    title = (title or "").strip()
+    word = title_gender_word(department)
+    if not title or not word:
+        return title
+    if _TITLE_GENDER_RE.search(title):
+        return title
+
+    brand_text = " ".join(str(brand or "").strip().split())
+    if brand_text:
+        match = re.search(re.escape(brand_text), title, flags=re.IGNORECASE)
+        if match:
+            return f"{title[:match.end()]} {word}{title[match.end():]}".strip()
+    return f"{word} {title}"
 
 
 def trim_title(title: str, size_for_display: str | None = None, limit: int = 80) -> str:
