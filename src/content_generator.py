@@ -79,7 +79,7 @@ def _sizing_sources() -> list:
     conversion after the fix was already deployed."""
     return [
         _resolve_size, _is_size_aspect,
-        aspect_matching.enforce_title_size,
+        aspect_matching.enforce_title_size, aspect_matching.trim_title,
         aspect_matching.match_shoe_size_uk, aspect_matching.match_shoe_size_eu,
         aspect_matching.match_size, aspect_matching.size_display,
         aspect_matching.size_display_for,
@@ -656,8 +656,8 @@ def generate_for_product(
     # brand casing above.
     result["title"] = aspect_matching.enforce_title_size(result.get("title", ""), size_for_title)
 
-    if len(result.get("title", "")) > 80:
-        result["title"] = result["title"][:80].rstrip()
+    result["title"] = aspect_matching.trim_title(
+        result.get("title", ""), size_for_title, limit=80)
 
     specifics = result.get("item_specifics", {}) or {}
 
@@ -774,7 +774,16 @@ def generate_for_product(
         raw_country = str(product.master.get("Country of Origin") or "").strip()
         if raw_country:
             alias = aspect_matching.COUNTRY_ALIASES.get(raw_country.lower())
-            specifics["C:Country of Origin"] = alias or raw_country
+            # An unresolved ISO code used to be written straight through, so
+            # "SLV" and "CXR" shipped as the Country of Origin on three
+            # listings (05.09.26) — adidas Sambas made in El Salvador, a
+            # Givenchy slipper made on Christmas Island. Country of Origin is
+            # a customs declaration, not a nice-to-have: an unrecognised code
+            # is left blank rather than guessed at or passed on raw.
+            if alias:
+                specifics["C:Country of Origin"] = alias
+            elif not aspect_matching.looks_like_country_code(raw_country):
+                specifics["C:Country of Origin"] = raw_country
 
     result["item_specifics"] = specifics
 

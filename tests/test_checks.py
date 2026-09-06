@@ -343,6 +343,63 @@ def test_the_report_reads_like_something_a_person_would_act_on():
     check("counts the fixes separately", "1 thing(s) corrected automatically" in report, True)
 
 
+def test_a_mule_is_resolved_from_its_own_title():
+    """The first 295-row batch dropped 11 products and every one was a mule.
+    Asked at combo level with nothing but "Footwear / Mules / WOMEN" to go
+    on, the model answered NONE rather than pick between Heels, Sandals and
+    Flats, and the 11 listings silently never appeared (05.09.26).
+
+    This checks the routing, not the answer: a mule must be looked up by its
+    own SKU, so the model sees the title, and a combo-level NONE cached
+    against "Footwear / Mules / WOMEN" must not be what decides it."""
+    from src import category_mapping
+
+    check("mules are on the per-product path",
+          ("Footwear", "Mules") in category_mapping.AMBIGUOUS_SUBCATS, True)
+
+    template = EbayTemplate(
+        listing_headers=["*Action", "Custom label (SKU)"],
+        categories=[
+            CategorySpec("55793", "Women's Shoes > Heels", [(1000, "New with box")]),
+            CategorySpec("62107", "Women's Shoes > Sandals", [(1000, "New with box")]),
+        ],
+        aspects={"55793": {}, "62107": {}},
+        info_rows=[])
+    fingerprint = category_mapping._template_fingerprint(template)
+
+    mule = Product(
+        sku="QTN02-001-828",
+        master={"Category": "Footwear", "SubCat2": "Mules", "Gender": "WOMEN",
+                "Clean Title Description": "JIMMY CHOO BING 100 GLITTER CRYSTAL PT TOE MULE"},
+        measurements={})
+
+    # A combo answer of NONE, exactly as the live run cached it.
+    cache = {category_mapping._combo_key("Footwear", "Mules", "WOMEN", fingerprint):
+             {"category_id": None, "category_name": None, "reasoning": "no fit"}}
+    check("a combo-level NONE no longer decides a mule",
+          category_mapping.lookup(cache, mule, template), None)
+
+    cache[category_mapping._product_key(mule.sku, fingerprint)] = {
+        "category_id": "55793", "category_name": "Women's Shoes > Heels",
+        "reasoning": "a 100mm heeled mule"}
+    resolved = category_mapping.lookup(cache, mule, template)
+    check("and its own title does",
+          resolved and resolved.get("category_id"), "55793")
+
+    # A non-ambiguous footwear combo must still take the cheap combo path,
+    # or every product costs an AI call.
+    sneaker = Product(
+        sku="QTN02-001-090",
+        master={"Category": "Footwear", "SubCat2": "Sneakers", "Gender": "MEN",
+                "Clean Title Description": "ALEXANDER MCQUEEN CANDID SNEAKER"},
+        measurements={})
+    combo_cache = {category_mapping._combo_key("Footwear", "Sneakers", "MEN", fingerprint):
+                   {"category_id": "62107", "category_name": "x", "reasoning": "y"}}
+    got = category_mapping.lookup(combo_cache, sneaker, template)
+    check("everything else still resolves once per combo",
+          got and got.get("category_id"), "62107")
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

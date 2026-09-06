@@ -25,6 +25,7 @@ macOS python3 with nothing installed.
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -540,6 +541,70 @@ def test_the_brand_rule_survives_the_whole_pipeline():
     check("end-to-end: and its title says UK 10", "UK 10" in other["title"], True)
 
 
+def test_an_over_long_title_keeps_its_size_end_to_end():
+    """trim_title is only worth anything if the pipeline calls it. The unit
+    check above passed while content_generator still did title[:80], so this
+    one runs a deliberately over-long AI title through generate_for_product
+    and checks what actually comes out."""
+    import tempfile
+    from src import ai_client, content_generator, ebay_template
+    from src.data_loader import Product
+
+    templates_dir = Path(__file__).resolve().parent.parent / "data" / "templates"
+    menswear = templates_dir / "menswear_shoes.json"
+    if not menswear.exists():
+        print("  (skipped end-to-end title check: data/templates not present)")
+        return
+
+    template = ebay_template.load_template(menswear)
+    category = template.category_by_id("15709")  # Men's Shoes > Trainers
+
+    long_title = ("CDG Homme Plus x Nike Air Max TL2.5 Low Top Sneaker Black "
+                  "Calf Leather Mesh Panel Trainers UK 7.5 RRP 395")
+
+    def fake_ai(system, user, tool_name, input_schema, **kwargs):
+        props = input_schema["properties"]["item_specifics"]["properties"]
+        required = set(input_schema["properties"]["item_specifics"].get("required", []))
+        specifics = {}
+        for name, spec in props.items():
+            if name not in required:
+                continue
+            if spec.get("type") == "array":
+                specifics[name] = spec["items"]["enum"][:1]
+            elif "enum" in spec:
+                specifics[name] = spec["enum"][0]
+            else:
+                specifics[name] = "Leather"
+        return {"title": long_title,
+                "condition_id": category.conditions[0][0],
+                "condition_description": "Good condition.",
+                "material_summary": "Calf Leather",
+                "item_specifics": specifics}
+
+    product = Product(
+        sku="TEST-TITLE",
+        master={"Brand": "COMME DES GARCON HOMME PLUS", "Gender": "MEN",
+                "Colour": "Black", "Category": "Footwear", "SubCat2": "Sneakers",
+                "Rounded RRP": 395,
+                "Clean Title Description": "CDG HOMME PLUS X NIKE AIR MAX TL2.5"},
+        measurements={"Size": "UK 7.5", "Description": "Good condition."})
+
+    original = ai_client.call_structured
+    ai_client.call_structured = fake_ai
+    try:
+        with tempfile.TemporaryDirectory() as cache_dir:
+            result = content_generator.generate_for_product(
+                product, category, template, cache_dir, force=True)
+    finally:
+        ai_client.call_structured = original
+
+    title = result["title"]
+    check("end-to-end: the title fits eBay's limit", len(title) <= 80, True)
+    check("end-to-end: and it still carries the size", "UK 7.5" in title, True)
+    check("end-to-end: and it does not end mid-word",
+          all(w in long_title.split() or w.isupper() for w in title.split()), True)
+
+
 def test_one_size_string_feeds_title_description_and_checks():
     """Title, description and the checks report must all describe the size
     the same way. They used to build it from three separate copies of the
@@ -680,6 +745,11 @@ def test_changing_a_sizing_rule_invalidates_the_cache():
         "match_shoe_size_eu", "_eu_to_uk_table", "_us_to_uk_table",
         "size_display", "enforce_title_size", "fuzzy_match", "match_size",
         "bare_number_system", "assumed_shoe_system", "size_display_for",
+        # trim_title decides whether the size survives into the title, so a
+        # change to it must invalidate the cache like any other sizing edit.
+        # Added 05.09.26 after mutation testing showed it could be dropped
+        # from the list with every check still green.
+        "trim_title",
     }
     missing = sorted(must_be_hashed - hashed)
     if missing:
@@ -713,6 +783,75 @@ def test_conversion_tables_are_internally_consistent():
                 FAILURES.append(
                     f"{name} table jumps more than a full size: EU {eu_a}->UK {uk_a} "
                     f"then EU {eu_b}->UK {uk_b}")
+
+
+def test_a_size_range_leaves_no_orphan_in_the_title():
+    """05.09.26: two Moon Boots shipped as "Snow Ankle Boots -3.5 UK 2.5-3.5
+    RRP 195". The size strip removed "Size 2.5" and walked away from the
+    "-3.5", which then sat in the title next to the size put back in."""
+    cases = [
+        ("MOON BOOT Light Low White Padded Snow Ankle Boots Size 2.5-3.5 RRP 195",
+         "UK 2.5-3.5"),
+        ("MOON BOOT Light Low Snow Boots UK 2.5 - 3.5 RRP 195", "UK 2.5-3.5"),
+        ("SOME BRAND Trainer White EU 41/42 RRP 200", "UK 7.5"),
+    ]
+    for title, size in cases:
+        out = am.enforce_title_size(title, size)
+        if re.search(r"(?<![\w.])-\s*\d", out):
+            FAILURES.append(f"orphan range end left in title: {out!r}")
+        if out.count(size) != 1:
+            FAILURES.append(f"size should appear exactly once, got {out!r}")
+
+
+def test_an_over_long_title_keeps_its_size():
+    """The blind title[:80] chop cut the size off the end of the very titles
+    enforce_title_size had just corrected (two CDG trainers, 05.09.26)."""
+    long_title = ("COMME DES GARCON HOMME PLUS CDG Homme Plus x Nike Air Max TL2.5 "
+                  "Sneaker Black UK 7.5 RRP 395")
+    out = am.trim_title(long_title, "UK 7.5")
+    if len(out) > 80:
+        FAILURES.append(f"trimmed title is still {len(out)} chars: {out!r}")
+    if "UK 7.5" not in out:
+        FAILURES.append(f"trimming dropped the size: {out!r}")
+    if not out.startswith("COMME DES GARCON HOMME PLUS"):
+        FAILURES.append(f"trimming dropped the brand: {out!r}")
+    if "RRP 395" not in out:
+        FAILURES.append(f"trimming dropped the RRP: {out!r}")
+    if out != out.strip() or "  " in out or out.split()[-1] != "395":
+        FAILURES.append(f"trimmed title is not clean: {out!r}")
+    # A title already inside the limit must come back untouched.
+    short = "GH BASS Weejun Larson Moc Penny Loafers Burgundy EU 44 RRP 245"
+    if am.trim_title(short, "EU 44") != short:
+        FAILURES.append("trim_title altered a title that already fitted")
+    # No word may be cut in half.
+    brutal = "BRAND " + " ".join(["Extraordinarily"] * 8) + " Descriptive Shoe UK 9 RRP 100"
+    out = am.trim_title(brutal, "UK 9")
+    if len(out) > 80:
+        FAILURES.append(f"trim_title exceeded the limit on a hard case: {out!r}")
+    for word in out.split():
+        if word not in brutal.split():
+            FAILURES.append(f"trim_title cut a word in half: {word!r} in {out!r}")
+
+
+def test_an_unrecognised_country_code_is_spotted():
+    """Country of Origin is a customs declaration. "SLV" and "CXR" reached
+    three live listings on 05.09.26 because an unresolved code was written
+    through raw."""
+    for code in ("SLV", "CXR", "IT", "xx"):
+        if not am.looks_like_country_code(code):
+            FAILURES.append(f"{code!r} should be recognised as a bare code")
+    for name in ("Italy", "United Kingdom", "El Salvador", "", None):
+        if am.looks_like_country_code(name):
+            FAILURES.append(f"{name!r} should not be treated as a bare code")
+    # Every code that actually appears in this account's Master File must
+    # resolve, so the blank-rather-than-guess path above stays a backstop.
+    for code in ("ITA", "CHN", "BGD", "PRT", "TUR", "IND", "NLD", "VNM", "GBR",
+                 "USA", "UKR", "SVK", "JPN", "BGR", "FRA", "COL", "ESP", "BRA",
+                 "LBN", "POL", "IDN", "ROU", "NZL", "ALB", "MAR", "TUN", "KHM",
+                 "KOR", "SLV", "PER", "DEU", "EGY", "CZE", "MEX", "CHE", "GRC",
+                 "CAN", "HUN", "CXR"):
+        if code.lower() not in am.COUNTRY_ALIASES:
+            FAILURES.append(f"{code} is in the Master File but has no country alias")
 
 
 def main():

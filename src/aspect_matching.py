@@ -33,6 +33,11 @@ COUNTRY_ALIASES = {
     "cze": "Czech Republic", "dnk": "Denmark", "ecu": "Ecuador", "egy": "Egypt",
     "est": "Estonia", "eth": "Ethiopia", "fin": "Finland", "fra": "France",
     "geo": "Georgia", "deu": "Germany", "gha": "Ghana", "grc": "Greece",
+    "slv": "El Salvador", "cxr": "Christmas Island", "hnd": "Honduras",
+    "nic": "Nicaragua", "cri": "Costa Rica", "pan": "Panama",
+    "dom": "Dominican Republic", "mus": "Mauritius", "mdg": "Madagascar",
+    "lka": "Sri Lanka", "tha": "Thailand", "twn": "Taiwan",
+    "svn": "Slovenia", "srb": "Serbia", "mda": "Moldova", "lux": "Luxembourg",
     "gtm": "Guatemala", "hkg": "Hong Kong", "hun": "Hungary", "isl": "Iceland",
     "ind": "India", "idn": "Indonesia", "irn": "Iran", "irq": "Iraq",
     "irl": "Ireland", "isr": "Israel", "ita": "Italy", "jpn": "Japan",
@@ -128,6 +133,14 @@ def match_country(raw: str | None, valid_values: list[str] | None) -> str | None
         if exact:
             return exact
     return fuzzy_match(raw, valid_values, cutoff=0.75)
+
+
+def looks_like_country_code(raw) -> bool:
+    """True for something shaped like an ISO country code rather than a
+    country name — "SLV", "CXR", "IT". Used to stop an unrecognised code
+    being written into a listing as though it were a country."""
+    text = str(raw or "").strip()
+    return bool(text) and len(text) <= 3 and text.isalpha()
 
 
 def match_department(gender: str | None, valid_values: list[str] | None) -> str | None:
@@ -574,9 +587,14 @@ def size_display_for(product, specifics, both=False, clothing_fallback=False):
 # ("UK 7", "EU45", "IT 40", "Sz 03", "Size 8"). Deliberately requires the
 # marker, so a bare number that isn't a size — a heel height ("20mm"), an
 # "RRP 395", a model name with digits — is never touched.
+# The trailing (?:\s*[-/\u2013]\s*\d+(?:\.\d+)?)? consumes the second half of a
+# range. Without it, "Snow Ankle Boots Size 2.5-3.5 RRP 195" lost only the
+# "Size 2.5" and left an orphan "-3.5" behind, so the title shipped as
+# "Snow Ankle Boots -3.5 UK 2.5-3.5 RRP 195" (two Moon Boots, 05.09.26).
 _TITLE_SIZE_RE = re.compile(
     r"\b(?:UK|EU|EUR|US|USA|IT|FR|JP|Size|Sz)\s*\.?\s*"
-    r"(?:\d+(?:\.\d+)?|(?:[2-9]?X{0,3}[SML]|One\s+Size)\b)",
+    r"(?:\d+(?:\.\d+)?(?:\s*[-/\u2013]\s*\d+(?:\.\d+)?)?"
+    r"|(?:[2-9]?X{0,3}[SML]|One\s+Size)\b)",
     re.IGNORECASE,
 )
 _TITLE_RRP_RE = re.compile(r"\bRRP\b.*$", re.IGNORECASE)
@@ -611,3 +629,52 @@ def enforce_title_size(title: str, size_for_display: str | None) -> str:
         head = cleaned[: rrp.start()].rstrip()
         return f"{head} {size_for_display} {rrp.group(0)}".strip()
     return f"{cleaned} {size_for_display}".strip()
+
+
+def trim_title(title: str, size_for_display: str | None = None, limit: int = 80) -> str:
+    """Cuts an over-long title to eBay's limit without losing the parts that
+    have to survive.
+
+    The old rule was title[:80], a blind character chop. On 05.09.26 that
+    turned "... x Nike Air Max TL2.5 Sneaker Black UK 7.5 RRP 395" into
+    "... Sneaker Black UK" — a title ending in a bare "UK", with the size
+    gone. That is precisely the title/specifics mismatch enforce_title_size
+    exists to prevent, undone one line later.
+
+    So words are dropped from the descriptive middle instead, working
+    backwards from just before the size, and the brand at the front, the
+    resolved size and the trailing "RRP ..." are all kept. Only if that
+    still doesn't fit does it fall back to a cut, and even then on a word
+    boundary rather than mid-word."""
+    title = (title or "").strip()
+    if len(title) <= limit:
+        return title
+
+    rrp_match = _TITLE_RRP_RE.search(title)
+    tail = rrp_match.group(0).strip() if rrp_match else ""
+    head = (title[: rrp_match.start()] if rrp_match else title).strip()
+
+    # The size fragment is protected: find it in the head so the words before
+    # it can be dropped without touching it.
+    size = (size_for_display or "").strip()
+    protected = ""
+    if size and size in head:
+        cut = head.rindex(size)
+        protected = head[cut:].strip()
+        head = head[:cut].strip()
+
+    words = head.split()
+    while words and len(" ".join(
+            [w for w in (" ".join(words), protected, tail) if w])) > limit:
+        words.pop()
+    result = " ".join(w for w in (" ".join(words), protected, tail) if w)
+    if len(result) <= limit:
+        return result
+
+    # Nothing left to drop and it still doesn't fit: cut on a word boundary.
+    kept = []
+    for word in result.split():
+        if len(" ".join(kept + [word])) > limit:
+            break
+        kept.append(word)
+    return " ".join(kept)

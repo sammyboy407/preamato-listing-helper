@@ -34,6 +34,14 @@ from .data_loader import Product
 # to have the same problem (e.g. Mules/Sandals mixing flat and heeled styles).
 AMBIGUOUS_SUBCATS = {
     ("Footwear", "Pumps"),
+    # Added 05.09.26. The first 295-row batch dropped 11 products, every one
+    # of them a mule: asked at combo level, with only the words "Footwear /
+    # Mules / WOMEN" to go on, the model answered NONE rather than choose
+    # between Heels, Sandals and Flats — and 11 listings silently never
+    # appeared. Each mule's own title settles it (CHLOE ISLA HIGH HEEL
+    # RAFFIA THONG MULE is a heel; VALENTINO BOWOW 75 METALLIC LTHR SANDAL
+    # MULE is a sandal), which is what per-product resolution reads.
+    ("Footwear", "Mules"),
 }
 
 SCHEMA = {
