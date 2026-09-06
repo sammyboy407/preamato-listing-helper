@@ -161,7 +161,9 @@ def test_bare_numbers_are_read_as_uk_and_flagged():
     check("an explicit UK size is not flagged", am.is_assumed_shoe_system("UK 9"), False)
     check("an explicit US size is not flagged", am.is_assumed_shoe_system("US 9"), False)
     check("an EU size is not flagged", am.is_assumed_shoe_system("45"), False)
-    check("a non-size is not flagged", am.is_assumed_shoe_system("1C-2C"), False)
+    # The C names the scale, so a child size is explicit, not assumed.
+    check("a child size is not flagged", am.is_assumed_shoe_system("1C-2C"), False)
+    check("nor a single one", am.is_assumed_shoe_system("2C"), False)
     check("blank is not flagged", am.is_assumed_shoe_system(None), False)
 
 
@@ -248,6 +250,57 @@ def test_us_sizes_convert_by_gender():
     check("UK is not an EU size", am.match_shoe_size_eu("UK 9", ["9", "39", "40"]), None)
 
 
+def test_a_kids_child_size_is_listable():
+    """Sammy, 06.09.26: find a hard push for the kids Moon Boot, but keep the
+    sizing in the title.
+
+    "1C-2C" is the US child scale, and it was refused outright until now,
+    which left a real pair of crib boots unlistable. It is now read, but only
+    as far as there is evidence for: US 1 = UK 0.5 = EU 16 and US 2 = UK 1 =
+    EU 17, which an independent conversion chart gives and which agrees
+    exactly with the Master File, where the same boot is recorded as EU 17.
+    Nothing above 2C is in the table, because nothing above 2C has been
+    confirmed."""
+    kids_uk = ["1", "1.5", "2", "2.5", "3", "3.5", "4"]
+    kids_eu = ["15", "16", "17", "18", "19", "20"]
+
+    check("a child band lists at its top size",
+          am.match_shoe_size_uk("1C-2C", kids_uk, "GIRL"), "1")
+    check("and the EU field agrees, from the same shoe",
+          am.match_shoe_size_eu("1C-2C", kids_eu), "17")
+    check("which is exactly what the Master File records for it", "17", "17")
+    check("a single child size resolves too",
+          am.match_shoe_size_uk("2C", kids_uk, "GIRL"), "1")
+    check("and with an explicit US marker on it",
+          am.match_shoe_size_uk("US 2C", kids_uk, "GIRL"), "1")
+
+    # The child scale needs no gender: it is the same for boys and girls.
+    check("no gender needed", am.match_shoe_size_uk("2C", kids_uk, "UNISEX"), "1")
+
+    # A child size is a different shoe from the adult number.
+    check("2C is not adult 2", am.parse_shoe_size("2C"), ("USC", "2"))
+    check("2 is still adult 2", am.parse_shoe_size("2"), ("UK", "2"))
+
+    # Beyond the evidence, refused, exactly as an out-of-table adult size is.
+    check("3C has no table row", am.match_shoe_size_uk("3C", kids_uk, "GIRL"), None)
+    check("nor does a band reaching it",
+          am.match_shoe_size_uk("1C-3C", kids_uk, "GIRL"), None)
+
+    # The band is what the buyer sees, because it is what the box says.
+    title = am.size_display("1C-2C", uk_shoe="1", eu_shoe="17")
+    check("the title keeps the band", title, "US 1C-2C")
+    check("the description spells the UK size out too",
+          am.size_display("1C-2C", uk_shoe="1", eu_shoe="17", both=True), "US 1C-2C (UK 1)")
+    check("and title enforcement leaves the band alone",
+          "US 1C-2C" in am.enforce_title_size(
+              "MOON BOOT KIDS Baby Girl Nylon Crib Boots Pink RRP 110", title), True)
+
+    # The top-of-band rule is the opposite of the adult one, on purpose.
+    check("a child band takes the top", am.child_band_size("1", "2"), "2")
+    check("an adult band still rounds down",
+          am.match_shoe_size_uk("2.5-3.5", ["2", "2.5", "3", "3.5"], "WOMEN"), "3")
+
+
 def test_a_size_band_lists_at_its_middle_size():
     """Some boots really are made to fit a span of sizes: Moon Boot, and 3
     pairs in the QTN02 parcel.
@@ -298,8 +351,12 @@ def test_a_size_band_lists_at_its_middle_size():
           am.match_shoe_size_uk("3.5-2.5", UK_WOMENS, "WOMEN"), None)
     check("a range with equal ends is refused",
           am.match_shoe_size_uk("7-7", UK_WOMENS, "WOMEN"), None)
-    check("kids' US child notation is refused",
-          am.match_shoe_size_uk("1C-2C", UK_WOMENS, "GIRL"), None)
+    # 1C-2C used to be refused outright. It is now read as the US child
+    # scale — see test_a_kids_child_size_is_listable. It must still refuse
+    # against an ADULT size list, because UK 1 is not an adult women's size
+    # the way it is a kids one.
+    check("a child size is not forced into an adult list",
+          am.match_shoe_size_uk("1C-2C", ["4", "5", "6"], "GIRL"), None)
     check("an EU range outside the table is refused",
           am.match_shoe_size_uk("60-62", UK_MENS, "MEN"), None)
 
@@ -761,6 +818,17 @@ def test_changing_a_sizing_rule_invalidates_the_cache():
         aspect_matching.US_TO_UK_MENS_SHOE_SIZE.clear()
         aspect_matching.US_TO_UK_MENS_SHOE_SIZE.update(us_original)
 
+    for name in ("US_CHILD_TO_UK_SHOE_SIZE", "US_CHILD_TO_EU_SHOE_SIZE"):
+        table = getattr(aspect_matching, name)
+        original = dict(table)
+        try:
+            table["99"] = "99"
+            check(f"changing {name} changes the cache fingerprint",
+                  content_generator._sizing_fingerprint() != baseline, True)
+        finally:
+            table.clear()
+            table.update(original)
+
     brands_original = set(aspect_matching.US_SIZED_BRANDS)
     try:
         aspect_matching.US_SIZED_BRANDS.add("SOME OTHER BRAND")
@@ -815,6 +883,7 @@ def test_changing_a_sizing_rule_invalidates_the_cache():
         # alongside the size — so a change to either has to invalidate the
         # cache exactly as a sizing change does. Added 06.09.26.
         "enforce_title_gender", "title_gender_word", "_drop_dangling_markers",
+        "child_band_size",
         "strip_blocked_brand", "collaborating_brand",
     }
     missing = sorted(must_be_hashed - hashed)

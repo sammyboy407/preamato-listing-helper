@@ -307,7 +307,22 @@ def bare_number_system(brand=None) -> str | None:
         return "US"
     return BARE_NUMBER_SHOE_SYSTEM
 
-_SHOE_SIZE_RE = re.compile(r"^\s*(uk|eu|eur|us|usa|it|fr|jp)?\s*[:\-]?\s*(\d+(?:\.\d+)?)\s*$", re.IGNORECASE)
+# US CHILD sizes, the "C" scale: 1C, 2C. A separate scale from adult US
+# sizing, which is why a bare "2" and a "2C" are different shoes.
+#
+# Deliberately two rows. Sammy's Moon Boot Kids crib boots are recorded as
+# "1C-2C" and her Master File records the same shoe as EU 17, and an
+# independent conversion chart gives US 1 = UK 0.5 = EU 16 and US 2 = UK 1 =
+# EU 17, which agrees with her data exactly. Beyond 2C there is no evidence
+# from this account and no second source, so those sizes are refused rather
+# than filled in from memory. Add rows when a real pair turns up to confirm
+# them, the same way the adult tables were built.
+US_CHILD_TO_UK_SHOE_SIZE = {"1": "0.5", "2": "1"}
+US_CHILD_TO_EU_SHOE_SIZE = {"1": "16", "2": "17"}
+
+_SHOE_SIZE_RE = re.compile(
+    r"^\s*(uk|eu|eur|us|usa|it|fr|jp)?\s*[:\-]?\s*(\d+(?:\.\d+)?)\s*(c)?\s*$",
+    re.IGNORECASE)
 
 
 def parse_shoe_size(raw: str | None, brand=None) -> tuple[str | None, str | None]:
@@ -326,6 +341,10 @@ def parse_shoe_size(raw: str | None, brand=None) -> tuple[str | None, str | None
     prefix, number = m.group(1), _canonical_number(m.group(2))
     if number is None:
         return None, None
+    # A trailing C is the US child scale and overrides everything else: "2C"
+    # and "US 2C" are the same shoe, and neither is an adult US 2.
+    if m.group(3):
+        return "USC", number
     if prefix:
         return _normalise_size_marker(prefix), number
     return ("EU" if float(number) >= 33 else bare_number_system(brand)), number
@@ -370,6 +389,8 @@ def parse_shoe_size_range(raw: str | None, brand=None) -> tuple[str | None, str 
     if any(n is None for n in numbers):
         return None, None, None
     low, high = numbers
+    # "1C-2C": the C on either end makes the whole band the child scale.
+    child = any(m.group(3) for m in ends)
 
     # An explicit marker on either end applies to both ("US 9-10" is a US
     # range, not a US size next to a UK one). Two different explicit markers
@@ -379,6 +400,8 @@ def parse_shoe_size_range(raw: str | None, brand=None) -> tuple[str | None, str 
     # 6 isn't an EU one). This just refuses it earlier and for the honest
     # reason, rather than relying on the tables not overlapping.
     markers = {_normalise_size_marker(m.group(1)) for m in ends if m.group(1)}
+    if child:
+        markers = {"USC"}
     if len(markers) > 1:
         return None, None, None
     if markers:
@@ -398,15 +421,40 @@ def parse_shoe_size_range(raw: str | None, brand=None) -> tuple[str | None, str 
     return system, low, high
 
 
+def child_band_size(low: str, high: str) -> str | None:
+    """Which child size a US "C" band actually gets listed as: the TOP one.
+
+    This is the opposite of the adult band rule, which rounds down, and the
+    reason is the scale rather than the shoe. Moon Boot Kids crib boots are
+    a 1C-2C band; 1C is UK 0.5, and every eBay kids shoe list starts at UK 1,
+    so the bottom of these bands is routinely a size eBay cannot express at
+    all. Taking the top gives a size that exists, and it agrees with the
+    Master File, which records that same boot as EU 17 — the 2C end.
+
+    Both the UK and the EU field go through here, so they are always derived
+    from one shoe and can never disagree with each other. The title still
+    carries the whole band."""
+    try:
+        return high if float(high) >= float(low) else low
+    except (TypeError, ValueError):
+        return None
+
+
 def _resolve_range_end(number, system, valid_values, gender):
     """One end of a range, through the same conversion as a single size."""
     if system == "UK":
-        return fuzzy_match(number, valid_values)
-    table = _eu_to_uk_table(gender) if system == "EU" else _us_to_uk_table(gender) if system == "US" else None
-    if table is None:
-        return None
-    converted = table.get(number)
-    return fuzzy_match(converted, valid_values) if converted else None
+        converted = number
+    else:
+        table = (_eu_to_uk_table(gender) if system == "EU"
+                 else _us_to_uk_table(gender) if system == "US"
+                 else US_CHILD_TO_UK_SHOE_SIZE if system == "USC"
+                 else None)
+        if table is None:
+            return None
+        converted = table.get(number)
+        if not converted:
+            return None
+    return fuzzy_match(converted, valid_values)
 
 
 def match_shoe_size_uk(raw: str | None, valid_values: list[str] | None, gender: str | None,
@@ -445,9 +493,18 @@ def match_shoe_size_uk(raw: str | None, valid_values: list[str] | None, gender: 
             return None
         uk_equivalent = table.get(number)
         return fuzzy_match(uk_equivalent, valid_values) if uk_equivalent else None
+    if system == "USC":
+        # The child scale is the same for boys and girls, so no gender is
+        # needed. Outside the two rows the table has evidence for, refused.
+        uk_equivalent = US_CHILD_TO_UK_SHOE_SIZE.get(number)
+        return fuzzy_match(uk_equivalent, valid_values) if uk_equivalent else None
 
     # Not a single size — try it as a range ("2.5-3.5").
     range_system, low, high = parse_shoe_size_range(raw, brand)
+    if range_system == "USC":
+        child = child_band_size(low, high)
+        uk_equivalent = US_CHILD_TO_UK_SHOE_SIZE.get(child) if child else None
+        return fuzzy_match(uk_equivalent, valid_values) if uk_equivalent else None
     if range_system:
         low_uk = _resolve_range_end(low, range_system, valid_values, gender)
         high_uk = _resolve_range_end(high, range_system, valid_values, gender)
@@ -496,7 +553,8 @@ def is_assumed_shoe_system(raw: str | None, brand=None) -> bool:
     text = str(raw)
     m = _SHOE_SIZE_RE.match(text)
     if m:
-        if m.group(1):
+        # A marker, or the C that names the child scale, makes it explicit.
+        if m.group(1) or m.group(3):
             return False
         number = _canonical_number(m.group(2))
         return number is not None and float(number) < 33
@@ -505,7 +563,7 @@ def is_assumed_shoe_system(raw: str | None, brand=None) -> bool:
     if len(parts) != 2:
         return False
     ends = [_SHOE_SIZE_RE.match(part) for part in parts]
-    if not all(ends) or any(e.group(1) for e in ends):
+    if not all(ends) or any(e.group(1) or e.group(3) for e in ends):
         return False
     numbers = [_canonical_number(e.group(2)) for e in ends]
     return all(n is not None and float(n) < 33 for n in numbers)
@@ -542,7 +600,12 @@ def match_shoe_size_eu(raw: str | None, valid_values: list[str] | None, brand=No
     system, number = parse_shoe_size(raw, brand)
     if system == "EU":
         return fuzzy_match(number, valid_values)
+    if system == "USC":
+        return fuzzy_match(US_CHILD_TO_EU_SHOE_SIZE.get(number), valid_values)
     range_system, low, high = parse_shoe_size_range(raw, brand)
+    if range_system == "USC":
+        child = child_band_size(low, high)
+        return fuzzy_match(US_CHILD_TO_EU_SHOE_SIZE.get(child), valid_values) if child else None
     if range_system == "EU":
         low_eu, high_eu = fuzzy_match(low, valid_values), fuzzy_match(high, valid_values)
         if low_eu and high_eu and low_eu != high_eu:
@@ -573,7 +636,15 @@ def size_display(raw_size, uk_shoe=None, eu_shoe=None, clothing_size=None, both=
             range_system, low, high = parse_shoe_size_range(raw_size, brand)
             if range_system:
                 system, number = range_system, f"{low}-{high}"
-        if system == "UK":
+        if system == "USC":
+            # Sammy, 06.09.26: keep the sizing in the title. The box says
+            # 1C-2C, so the listing says 1C-2C, with the UK size eBay was
+            # given alongside it in the description. The item specific is a
+            # single size because eBay allows nothing else; the title is
+            # where the truth about the band lives.
+            primary = "US " + "-".join(f"{n}C" for n in str(number).split("-"))
+            other = f"UK {uk_shoe}" if uk_shoe else (f"EU {eu_shoe}" if eu_shoe else None)
+        elif system == "UK":
             primary, other = f"UK {number}", (f"EU {eu_shoe}" if eu_shoe else None)
         elif system == "EU":
             primary, other = f"EU {number}", (f"UK {uk_shoe}" if uk_shoe else None)

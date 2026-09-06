@@ -80,7 +80,7 @@ def _sizing_sources() -> list:
     return [
         _resolve_size, _is_size_aspect,
         aspect_matching.enforce_title_size, aspect_matching.trim_title,
-        aspect_matching.middle_size,
+        aspect_matching.middle_size, aspect_matching.child_band_size,
         # Not a size, but it decides the finished title, which is
         # cached alongside it — so a change here has to invalidate
         # the cache exactly as a sizing change does.
@@ -116,6 +116,8 @@ def _sizing_fingerprint() -> str:
     parts.append(repr(sorted(aspect_matching.EU_TO_UK_WOMENS_SHOE_SIZE.items())))
     parts.append(repr(sorted(aspect_matching.US_TO_UK_MENS_SHOE_SIZE.items())))
     parts.append(repr(sorted(aspect_matching.US_TO_UK_WOMENS_SHOE_SIZE.items())))
+    parts.append(repr(sorted(aspect_matching.US_CHILD_TO_UK_SHOE_SIZE.items())))
+    parts.append(repr(sorted(aspect_matching.US_CHILD_TO_EU_SHOE_SIZE.items())))
     parts.append(repr(aspect_matching.BARE_NUMBER_SHOE_SYSTEM))
     parts.append(repr(sorted(aspect_matching.US_SIZED_BRANDS)))
     parts.append(repr(sorted(aspect_matching.SIZE_ALIASES.items())))
