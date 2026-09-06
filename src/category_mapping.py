@@ -44,6 +44,56 @@ AMBIGUOUS_SUBCATS = {
     ("Footwear", "Mules"),
 }
 
+# Footwear that the Master File does not file as footwear.
+#
+# Sammy, 06.09.26: "shoes slippers need to go under footwear". Two lounge
+# slippers (a Givenchy and a Simon Miller) are recorded as Lifestyle / Home
+# Accessories, so they were offered to the homeware template first — it is
+# alphabetically first — and the Givenchy went out as Home Décor > Other Home
+# Décor, with a Type of "Cherries" because the Home Décor Type list has no
+# slipper in it, and no size anywhere because Home Décor has no shoe size
+# aspect. It is a size 40 men's leather shoe.
+#
+# The Master File contradicts itself on these rows, and the contradiction is
+# what makes them findable: Department reads "Mens Shoes" / "Ladies Shoes"
+# and the customs Tariff Code is in chapter 6401-6405, which IS footwear.
+# Either of those alone is enough.
+FOOTWEAR_TARIFF_PREFIXES = ("6401", "6402", "6403", "6404", "6405")
+
+
+def _looks_like_footwear(product) -> bool:
+    if "shoe" in str(product.m("Department") or "").lower():
+        return True
+    tariff = "".join(c for c in str(product.m("Tariff Code") or "") if c.isdigit())
+    return tariff.startswith(FOOTWEAR_TARIFF_PREFIXES)
+
+
+def is_misfiled_footwear(product) -> bool:
+    """A product whose own Category does not say Footwear while everything
+    else about it does.
+
+    Deliberately narrow. Products already filed as Footwear are left alone:
+    295 rows went through on 05.09.26 and the Category column was right for
+    every one of them, including the kids Moon Boot that correctly wanted the
+    kidswear template rather than a shoes one.
+
+    These are resolved per product rather than per combo, for the same reason
+    Mules are: the combo here is ("Lifestyle", "Home Accessories", "WOMEN"),
+    which the Simon Miller slipper shares with 34 genuine candles, vases and
+    trays. One combo-level answer of "Women's Shoes" would drag all 35 into
+    footwear. The product's own title is the only thing that can separate
+    them."""
+    if str(product.m("Category") or "").strip().lower() == "footwear":
+        return False
+    return _looks_like_footwear(product)
+
+
+def covers_footwear(template) -> bool:
+    """Whether a template has any shoe category at all, so the pipeline can
+    offer a misfiled slipper the shoes templates before the homeware one."""
+    return any("shoes" in str(c.category_name or "").lower() for c in template.categories)
+
+
 SCHEMA = {
     "type": "object",
     "properties": {
@@ -125,6 +175,17 @@ def _pick_category(system: str, user: str, candidates: list[ebay_template.Catego
     }
 
 
+def _needs_its_own_answer(product) -> bool:
+    """Whether this product is resolved from its own title rather than from
+    its (Category, SubCat2, Gender) labels. Used by both build_mapping and
+    lookup — they read the cache with different keys, so if they ever
+    disagreed about a product, its mapping would be built under one key and
+    read back under the other, and it would silently vanish from the file."""
+    if (str(product.m("Category")), str(product.m("SubCat2"))) in AMBIGUOUS_SUBCATS:
+        return True
+    return is_misfiled_footwear(product)
+
+
 def build_mapping(
     products: list[Product],
     template: ebay_template.EbayTemplate,
@@ -144,7 +205,7 @@ def build_mapping(
     combos = {
         (str(p.m("Category")), str(p.m("SubCat2")), str(p.m("Gender")))
         for p in products
-        if (str(p.m("Category")), str(p.m("SubCat2"))) not in AMBIGUOUS_SUBCATS
+        if not _needs_its_own_answer(p)
     }
     for category, subcat2, gender in sorted(combos):
         key = _combo_key(category, subcat2, gender, template_fp)
@@ -162,10 +223,7 @@ def build_mapping(
         status = f"{cache[key]['category_id']} ({cache[key]['category_name']})" if cache[key]['category_id'] else "NO MATCH in this template"
         print(f"  [category map] {category} / {subcat2} / {gender} -> {status}")
 
-    ambiguous_products = [
-        p for p in products
-        if (str(p.m("Category")), str(p.m("SubCat2"))) in AMBIGUOUS_SUBCATS
-    ]
+    ambiguous_products = [p for p in products if _needs_its_own_answer(p)]
     for p in ambiguous_products:
         key = _product_key(p.sku, template_fp)
         if key in cache:
@@ -193,7 +251,7 @@ def lookup(cache: dict, product: Product, template: ebay_template.EbayTemplate) 
     template_fp = _template_fingerprint(template)
     category, subcat2, gender = str(product.m("Category")), str(product.m("SubCat2")), str(product.m("Gender"))
 
-    if (category, subcat2) in AMBIGUOUS_SUBCATS:
+    if _needs_its_own_answer(product):
         entry = cache.get(_product_key(product.sku, template_fp))
     else:
         entry = cache.get(_combo_key(category, subcat2, gender, template_fp))

@@ -9,6 +9,7 @@ is full of things that don't matter, the one that does gets skimmed past.
 """
 from __future__ import annotations
 
+import pathlib
 import sys
 import types
 from pathlib import Path
@@ -315,19 +316,23 @@ def test_notes_never_crowd_out_the_things_that_need_a_person():
     check("and still names the SKU", "SKU-1" in notes_only, True)
 
 
-def test_a_range_size_is_named_in_the_report():
-    """The range is a value off eBay's dropdown list. It has been accepted
-    before, but each one is named so a rejection is spotted on the first
-    upload rather than found later."""
+def test_a_size_band_is_named_in_the_report():
+    """A boot sold across a band is the one listing that says a different
+    size in two places on purpose: the middle size in the item specific,
+    because eBay refuses a band there, and the whole band in the title,
+    because that is what the buyer needs. Named in the report so nobody
+    later reads it as the title/specifics bug it looks like."""
     product = make_product({"Size": "2.5-3.5"}, brand="MOON BOOT")
     row = good_row(Title="MOON BOOT Snow Boots White UK 2.5-3.5 RRP 250",
-                   **{"C:UK Shoe Size": "2.5-3.5"})
-    check("range size named",
-          any("sized as a range" in m for m in messages(run(row, product=product, size="UK 2.5-3.5"))), True)
+                   **{"C:UK Shoe Size": "3"})
+    said = messages(run(row, product=product, size="UK 2.5-3.5"))
+    check("the band is named", any("sized as a band" in m for m in said), True)
+    check("and it names the size actually listed",
+          any("UK 3" in m for m in said if "sized as a band" in m), True)
 
     single = good_row(Title="MOON BOOT Snow Boots White UK 3 RRP 250", **{"C:UK Shoe Size": "3"})
     check("a single size is not named",
-          any("sized as a range" in m for m in
+          any("sized as a band" in m for m in
               messages(run(single, product=make_product({"Size": "UK 3"}), size="UK 3"))), False)
 
 
@@ -398,6 +403,199 @@ def test_a_mule_is_resolved_from_its_own_title():
     got = category_mapping.lookup(combo_cache, sneaker, template)
     check("everything else still resolves once per combo",
           got and got.get("category_id"), "62107")
+
+
+def test_a_slipper_filed_as_homeware_is_still_a_shoe():
+    """Sammy, 06.09.26: "shoes slippers need to go under footwear".
+
+    A Givenchy lounge slipper is recorded as Lifestyle / Home Accessories, so
+    it was offered to the homeware template first (alphabetically first) and
+    went out as Home Décor > Other Home Décor, with a Type of "Cherries"
+    because Home Décor's Type list has no slipper in it, and no size at all
+    because Home Décor has no shoe size aspect. It is a size 40 men's leather
+    shoe.
+
+    The rule is deliberately narrow, and these checks are mostly about what
+    it must NOT catch."""
+    from src import category_mapping, pipeline
+
+    givenchy = Product(
+        sku="QTN02-001-613",
+        master={"Category": "Lifestyle", "SubCat2": "Home Accessories",
+                "Gender": "MEN", "Department": "Mens Shoes",
+                "Tariff Code": "6403599900",
+                "Clean Title Description": "GIVENCHY LABEL LOUNGE SLIPPER HOME ACCESSORIES"},
+        measurements={})
+    check("a slipper filed as homeware is spotted",
+          category_mapping.is_misfiled_footwear(givenchy), True)
+
+    # Department alone is enough, and so is the tariff code alone.
+    check("Department alone is enough", category_mapping.is_misfiled_footwear(Product(
+        sku="X", master={"Category": "Lifestyle", "SubCat2": "Home Accessories",
+                         "Department": "Ladies Shoes"}, measurements={})), True)
+    check("the tariff code alone is enough", category_mapping.is_misfiled_footwear(Product(
+        sku="X", master={"Category": "Lifestyle", "SubCat2": "Home Accessories",
+                         "Department": "Ladies Lifestyle", "Tariff Code": "6404199000"},
+        measurements={})), True)
+
+    # What it must not catch. A genuine candle shares the Givenchy's combo.
+    candle = Product(
+        sku="QTN02-000-001",
+        master={"Category": "Lifestyle", "SubCat2": "Home Accessories",
+                "Gender": "WOMEN", "Department": "Ladies Lifestyle",
+                "Tariff Code": "3406000000",
+                "Clean Title Description": "DIPTYQUE BAIES SCENTED CANDLE"},
+        measurements={})
+    check("a genuine homeware item is left alone",
+          category_mapping.is_misfiled_footwear(candle), False)
+
+    # And anything already filed as Footwear keeps the behaviour that got 283
+    # listings right on 05.09.26, including the kids boot that correctly
+    # wanted the kidswear template rather than a shoes one.
+    kids_boot = Product(
+        sku="QTN02-002-112",
+        master={"Category": "Footwear", "SubCat2": "Boots", "Gender": "GIRL",
+                "Department": "Kidswear", "Tariff Code": "6404199000"},
+        measurements={})
+    check("a product already filed as Footwear is untouched",
+          category_mapping.is_misfiled_footwear(kids_boot), False)
+
+    # The combo path is what would drag 34 candles into Women's Shoes, so a
+    # misfiled slipper has to be resolved from its own title instead.
+    check("and it is resolved from its own title, not its combo",
+          category_mapping._needs_its_own_answer(givenchy), True)
+    check("while the candle keeps the cheap combo path",
+          category_mapping._needs_its_own_answer(candle), False)
+
+    # Template order: shoes first for the slipper, unchanged for everyone
+    # else, and never a template dropped.
+    class FakeTemplate:
+        def __init__(self, names):
+            self.categories = [CategorySpec(str(i), n, []) for i, n in enumerate(names)]
+
+    templates = [
+        FakeTemplate(["Home Décor > Other Home Décor"]),      # homeware
+        FakeTemplate(["Girls > Girls' Shoes"]),               # kidswear
+        FakeTemplate(["Men's Shoes > Slippers"]),             # menswear_shoes
+        FakeTemplate(["Women's Clothing > Dresses"]),         # womenswear_clothing
+    ]
+    order = pipeline._template_order(givenchy, templates)
+    check("shoe templates are offered to the slipper first", order[0] in (1, 2), True)
+    check("the homeware template is not dropped, only demoted",
+          sorted(order), [0, 1, 2, 3])
+    check("everyone else keeps the given order",
+          pipeline._template_order(candle, templates), [0, 1, 2, 3])
+
+    # build_mapping writes under one key and lookup reads under another, so
+    # if they ever disagree about a product its mapping is built and then
+    # never found, and it drops out of the file with no error at all. That is
+    # how 11 mules went missing. Both sides go through _needs_its_own_answer
+    # for exactly this reason, and this proves lookup honours it.
+    real_template = EbayTemplate(
+        listing_headers=["*Action", "Custom label (SKU)"],
+        categories=[CategorySpec("11505", "Men's Shoes > Slippers", [(1000, "New with box")])],
+        aspects={"11505": {}},
+        info_rows=[])
+    fingerprint = category_mapping._template_fingerprint(real_template)
+
+    combo_only = {category_mapping._combo_key(
+        "Lifestyle", "Home Accessories", "MEN", fingerprint):
+        {"category_id": "10034", "category_name": "Home Décor > Other Home Décor",
+         "reasoning": "home accessories"}}
+    check("a combo answer does not decide a misfiled slipper",
+          category_mapping.lookup(combo_only, givenchy, real_template), None)
+
+    per_product = dict(combo_only)
+    per_product[category_mapping._product_key(givenchy.sku, fingerprint)] = {
+        "category_id": "11505", "category_name": "Men's Shoes > Slippers",
+        "reasoning": "a leather lounge slipper"}
+    found = category_mapping.lookup(per_product, givenchy, real_template)
+    check("its own answer does, and is found where build_mapping wrote it",
+          found and found.get("category_id"), "11505")
+
+    # The other half of the same trap: build_mapping has to WRITE the key
+    # lookup reads. Testing lookup alone would not catch build_mapping
+    # answering per combo, which loses the product just as completely.
+    import tempfile
+    from src import ai_client
+    asked = []
+
+    def fake_ai(system, user, tool_name, input_schema, **kwargs):
+        asked.append(user)
+        return {"category_id": "11505", "reasoning": "a leather lounge slipper"}
+
+    original = ai_client.call_structured
+    ai_client.call_structured = fake_ai
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            built = category_mapping.build_mapping(
+                [givenchy, candle], real_template, pathlib.Path(d) / "map.json")
+    finally:
+        ai_client.call_structured = original
+
+    check("build_mapping writes the slipper under its own SKU",
+          category_mapping._product_key(givenchy.sku, fingerprint) in built, True)
+    check("and the round trip finds it",
+          (category_mapping.lookup(built, givenchy, real_template) or {}).get("category_id"),
+          "11505")
+    check("and the model was shown the slipper's title, which is what decides it",
+          any("LOUNGE SLIPPER" in u for u in asked), True)
+
+
+def test_a_misfiled_slipper_is_named_in_the_report():
+    """The routing now handles these, but the Master File row is still
+    self-contradictory and the fix belongs there. Named so nobody has to
+    find it by reading a listing, which is how the first one was found."""
+    givenchy = make_product({}, brand="Givenchy")
+    givenchy.master.update({
+        "Category": "Lifestyle", "SubCat2": "Home Accessories",
+        "Department": "Mens Shoes", "Tariff Code": "6403599900"})
+    row = good_row(**{"Category name": "Men's Shoes > Slippers"})
+    said = messages(run(row, product=givenchy, size="UK 6.5"))
+    check("the contradiction is named",
+          any("filed as Lifestyle" in m for m in said), True)
+    check("and it says where the listing actually went",
+          any("Men's Shoes > Slippers" in m for m in said), True)
+
+    ordinary = make_product({}, brand="Givenchy")
+    ordinary.master.update({
+        "Category": "Footwear", "SubCat2": "Flat Shoes",
+        "Department": "Mens Shoes", "Tariff Code": "6403599900"})
+    check("an ordinary shoe is not named",
+          any("filed as" in m for m in messages(run(good_row(), product=ordinary, size="UK 8"))),
+          False)
+
+
+def test_every_module_imports_on_this_python():
+    """Every module in src/ must import cleanly on whatever Python is running
+    this suite.
+
+    06.09.26: pipeline.py had `ProgressFn = Callable[[str, float | None],
+    None]` at module level. That is a runtime expression, not an annotation,
+    so `from __future__ import annotations` does not defer it, and PEP 604
+    unions there need Python 3.10. It imported fine everywhere it was ever
+    run — Streamlit Cloud, and the machine the fix was written on — and blew
+    up on Sammy's Mac, which runs the 3.9 that ships with Apple's Command
+    Line Tools. It only surfaced because a new test happened to import
+    pipeline; app.py, main.py, brand_blurb and data_loader are imported by no
+    test at all and would have carried the same bug silently.
+
+    So this imports all of them, on the interpreter actually in use. It is
+    the cheapest test here and it covers the whole package."""
+    import importlib
+    import pkgutil
+    import src
+
+    failures = []
+    for module in sorted(m.name for m in pkgutil.iter_modules(src.__path__)):
+        try:
+            importlib.import_module(f"src.{module}")
+        except Exception as exc:  # noqa: BLE001 - reporting, not handling
+            failures.append(f"src/{module}.py: {type(exc).__name__}: {exc}")
+    for f in failures:
+        FAILURES.append(f"does not import on Python {sys.version_info.major}."
+                        f"{sys.version_info.minor}: {f}")
+    check("every module in src/ imports", failures, [])
 
 
 def main():

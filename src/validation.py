@@ -101,6 +101,7 @@ def check_row(
     _check_measurements(sku, product, issues)
     _check_assumed_size(sku, product, row, issues)
     _check_range_size(sku, product, row, issues)
+    _check_misfiled_footwear(sku, product, row, issues)
     _check_length_contradictions(sku, row, issues)
     _check_description_gaps(sku, row, issues)
 
@@ -255,22 +256,50 @@ def _check_assumed_size(sku, product, row, issues):
                             group=group))
 
 
+def _check_misfiled_footwear(sku, product, row, issues):
+    """A product the Master File files as homeware while its own Department
+    and customs tariff code say it is a shoe.
+
+    The routing now sends these to the shoes templates (see
+    category_mapping.is_misfiled_footwear), but the underlying row is still
+    self-contradictory, so it is named here. Two in 1,752 on 06.09.26, both
+    lounge slippers, and the one that reached a listing went out as Home
+    Décor with a Type of "Cherries". The fix belongs in the Master File; this
+    is so nobody has to find it by reading a listing."""
+    from . import category_mapping
+    if not category_mapping.is_misfiled_footwear(product):
+        return
+    issues.append(Issue(
+        sku, "NOTE",
+        f"{sku}: filed as {_text(product.m('Category'))} / "
+        f"{_text(product.m('SubCat2'))} but Department reads "
+        f"{_text(product.m('Department'))}, so it is listed as "
+        f"{_text(row.get('Category name'))}. Worth correcting in the Master File",
+        group="Filed as homeware, listed as footwear"))
+
+
 def _check_range_size(sku, product, row, issues):
     """A boot sold to fit a span of sizes ("2.5-3.5", "45/47" — Moon Boot
-    being the usual case) carries that range into the item specific rather
-    than being collapsed to one end. This account has already sold one that
-    way (UK Shoe Size "10.5-12"), so eBay accepts it, but the value is off
-    eBay's dropdown list and acceptance can vary by category — so each one is
-    named here to be watched on its first upload rather than discovered as a
-    rejection."""
-    uk_size = _text(row.get("C:UK Shoe Size"))
-    if "-" not in uk_size:
-        return
+    being the usual case).
+
+    Until 06.09.26 the band went into the item specific whole. eBay refused
+    it: UK Shoe Size is Required and takes one value off a fixed list, so
+    two Moon Boots were rejected out of the first 295 row batch. The specific
+    now carries the middle size and the title and description carry the band,
+    which is Sammy's rule and what a buyer needs to read anyway. Each one is
+    still named in the report, because it is the one place a listing says a
+    different size in two places on purpose."""
     raw = _text(product.measurements.get("Size"))
+    if "-" not in raw and "/" not in raw:
+        return
+    uk_size = _text(row.get("C:UK Shoe Size"))
+    if not uk_size:
+        return
     issues.append(Issue(
-        sku, "REVIEW",
-        f"sized as a range ({raw!r}), listed as UK {uk_size} rather than collapsed to one "
-        f"end — check eBay accepts the range on this category"))
+        sku, "NOTE",
+        f"{sku}: sized as a band ({raw}), listed at UK {uk_size} with the full band in "
+        f"the title",
+        group="Boots sold across a size band"))
 
 
 def _check_length_contradictions(sku, row, issues):

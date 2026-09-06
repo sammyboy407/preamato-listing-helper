@@ -204,11 +204,14 @@ def test_a_bare_number_follows_the_brand_rule():
     check("US brand with unknown gender is refused",
           am.match_shoe_size_uk("10", UK_MENS, "UNISEX", brand="BLACKSTOCK & WEBER"), None)
 
-    # Ranges follow the brand rule too.
-    check("a bare range on a US brand converts",
-          am.match_shoe_size_uk("9-10", UK_MENS, "MEN", brand="BLACKSTOCK & WEBER"), "8.5-9.5")
-    check("a bare range elsewhere stays UK",
-          am.match_shoe_size_uk("9-10", UK_MENS, "MEN", brand="GH BASS"), "9-10")
+    # Bands follow the brand rule too, before the middle size is taken.
+    check("a bare band on a US brand converts",
+          am.match_shoe_size_uk("9-10", UK_MENS, "MEN", brand="BLACKSTOCK & WEBER"), "9")
+    check("a bare band elsewhere stays UK",
+          am.match_shoe_size_uk("9-10", UK_MENS, "MEN", brand="GH BASS"), "9.5")
+    check("and the two do not agree, which is the whole point",
+          am.match_shoe_size_uk("9-10", UK_MENS, "MEN", brand="BLACKSTOCK & WEBER")
+          != am.match_shoe_size_uk("9-10", UK_MENS, "MEN", brand="GH BASS"), True)
 
     # And the report has to be able to say WHICH reading was assumed.
     check("assumed scale is named for a US brand",
@@ -245,24 +248,35 @@ def test_us_sizes_convert_by_gender():
     check("UK is not an EU size", am.match_shoe_size_eu("UK 9", ["9", "39", "40"]), None)
 
 
-def test_a_size_range_is_carried_through_not_collapsed():
-    """Some boots really are made to fit a span of sizes — Moon Boot, and 3
-    pairs in the QTN02 parcel. This account has already sold one on eBay with
-    UK Shoe Size "10.5-12" and EU Shoe Size "45/47"
-    (data/account_listings_export.csv), so a range is a legitimate value and
-    collapsing it to one end would claim a fit the boot doesn't have."""
-    check("bare UK range passes through",
-          am.match_shoe_size_uk("2.5-3.5", UK_WOMENS, "WOMEN"), "2.5-3.5")
-    check("a UK range needs no gender",
-          am.match_shoe_size_uk("2.5-3.5", UK_MENS, "UNISEX"), "2.5-3.5")
-    check("the real sold example still resolves",
-          am.match_shoe_size_uk("10.5-12", UK_WOMENS, "WOMEN"), "10.5-12")
-    check("an EU range converts both ends",
-          am.match_shoe_size_uk("45/47", UK_MENS, "MEN"), "11-13")
-    check("an explicit EU range converts",
-          am.match_shoe_size_uk("EU 39-41", UK_WOMENS, "WOMEN"), "6-8")
-    check("a US range converts both ends",
-          am.match_shoe_size_uk("US 9-10", UK_MENS, "MEN"), "8.5-9.5")
+def test_a_size_band_lists_at_its_middle_size():
+    """Some boots really are made to fit a span of sizes: Moon Boot, and 3
+    pairs in the QTN02 parcel.
+
+    Until 06.09.26 the band went into the item specific whole. eBay refused
+    it — UK Shoe Size is Required and takes one value off a fixed list — and
+    two Moon Boots were rejected out of the first 295 row batch. Sammy's
+    rule: "put the middle number in the item specifics but 2.5-3.5 in the
+    title". So the specific carries one real size and the display string,
+    built from the raw size rather than from the specific, still carries the
+    band. test_a_band_is_shown_whole_to_the_buyer covers the other half."""
+    check("a UK band lists at its middle size",
+          am.match_shoe_size_uk("2.5-3.5", UK_WOMENS, "WOMEN"), "3")
+    check("a UK band needs no gender",
+          am.match_shoe_size_uk("2.5-3.5", UK_MENS, "UNISEX"), "3")
+    check("the previously sold example resolves",
+          am.match_shoe_size_uk("10.5-12", UK_WOMENS, "WOMEN"), "11")
+    check("an EU band converts both ends before taking the middle",
+          am.match_shoe_size_uk("45/47", UK_MENS, "MEN"), "12")
+    check("an explicit EU band converts",
+          am.match_shoe_size_uk("EU 39-41", UK_WOMENS, "WOMEN"), "7")
+    check("a US band converts",
+          am.match_shoe_size_uk("US 9-10", UK_MENS, "MEN"), "9")
+    # An even-length band rounds down: a roomy boot is wearable, a tight one
+    # is a return.
+    check("an even band rounds down",
+          am.middle_size("2.5", "3", UK_WOMENS), "2.5")
+    check("the middle of a band is always a real eBay value",
+          am.match_shoe_size_uk("2.5-3.5", UK_WOMENS, "WOMEN") in UK_WOMENS, True)
     check("an EU range fills the EU field too",
           am.match_shoe_size_eu("45/47", ["44", "45", "46", "47"]), "45-47")
     check("a UK range never fills the EU field",
@@ -315,7 +329,7 @@ def test_ambiguous_sizes_are_refused_not_guessed():
     check("blank gender refused", am.match_shoe_size_uk("43", UK_MENS, None), None)
     check("GIRL refused", am.match_shoe_size_uk("37", UK_WOMENS, "GIRL"), None)
     # Junk. (A well-formed range like "39/40" is a real size and is handled
-    # in test_a_size_range_is_carried_through_not_collapsed — what stays
+    # in test_a_size_band_lists_at_its_middle_size — what stays
     # refused is anything that isn't a size at all.)
     check("non-numeric refused", am.match_shoe_size_uk("abc", UK_WOMENS, "WOMEN"), None)
     check("open-ended range refused", am.match_shoe_size_uk("39-", UK_WOMENS, "WOMEN"), None)
@@ -684,6 +698,39 @@ def test_the_buyer_facing_description_says_the_same_size():
           "Size: EU 45 (UK 11)")
     check("clothing with no matched size still shows what was recorded",
           size_line("VISVIM", "03", {}), "Size: 03")
+    # The other half of the band rule: the specific says one size, the buyer
+    # is told the whole band. The description is built from the raw size, not
+    # from the specific, which is what makes that possible.
+    check("a band is shown whole to the buyer",
+          size_line("MOON BOOT", "2.5-3.5", {"C:UK Shoe Size": "3"}), "Size: UK 2.5-3.5")
+
+
+def test_a_band_is_shown_whole_to_the_buyer():
+    """Sammy, 06.09.26: "put the middle number in the item specifics but
+    2.5-3.5 in the title". Both halves have to hold at once, and they are
+    produced by different code, so both are checked here.
+
+    The failure this guards against is subtle: make the display string read
+    from the item specific instead of the raw size and the specific is still
+    right, the file still uploads, and the buyer is quietly told the boot is
+    a UK 3 when it is a 2.5 to 3.5 shell."""
+    check("the specific carries one real size",
+          am.match_shoe_size_uk("2.5-3.5", UK_WOMENS, "WOMEN"), "3")
+    check("the title carries the band",
+          am.size_display("2.5-3.5", uk_shoe="3"), "UK 2.5-3.5")
+    check("and so does the description",
+          am.size_display("2.5-3.5", uk_shoe="3", both=True), "UK 2.5-3.5")
+    check("an EU band is shown as recorded, in EU",
+          am.size_display("45/47", uk_shoe="12", eu_shoe="45-47"), "EU 45-47")
+    check("with the conversion alongside in the description",
+          am.size_display("45/47", uk_shoe="12", eu_shoe="45-47", both=True),
+          "EU 45-47 (UK 12)")
+    # And the title enforcement must not "correct" the band back to the
+    # single size, which is exactly what it is built to do everywhere else.
+    title = am.enforce_title_size(
+        "MOON BOOT Light Low White Padded Snow Ankle Boots RRP 195", "UK 2.5-3.5")
+    check("title enforcement leaves the band alone", "UK 2.5-3.5" in title, True)
+    check("and does not put the middle size in the title", "UK 3 " in title, False)
 
 
 def test_changing_a_sizing_rule_invalidates_the_cache():
@@ -750,6 +797,10 @@ def test_changing_a_sizing_rule_invalidates_the_cache():
         # Added 05.09.26 after mutation testing showed it could be dropped
         # from the list with every check still green.
         "trim_title",
+        # middle_size decides the number in the item specific for a band.
+        # Added 06.09.26; mutation testing showed it could drop out of the
+        # list with every check still green, same as trim_title before it.
+        "middle_size",
     }
     missing = sorted(must_be_hashed - hashed)
     if missing:

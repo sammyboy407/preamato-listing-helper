@@ -452,8 +452,31 @@ def match_shoe_size_uk(raw: str | None, valid_values: list[str] | None, gender: 
         low_uk = _resolve_range_end(low, range_system, valid_values, gender)
         high_uk = _resolve_range_end(high, range_system, valid_values, gender)
         if low_uk and high_uk and low_uk != high_uk:
-            return f"{low_uk}-{high_uk}"
+            return middle_size(low_uk, high_uk, valid_values)
     return None
+
+
+def middle_size(low: str, high: str, valid_values: list[str]) -> str:
+    """The size to put in the item specific for a boot sold across a band.
+
+    Moon Boot builds one shell to fit UK 2.5 to 3.5 and prints the band on
+    the box. UK Shoe Size is a Required aspect that takes one value from
+    eBay's list, so a band has nowhere to go: two of them were refused on
+    06.09.26. Sammy's rule: "put the middle number in the item specifics but
+    2.5-3.5 in the title". The buyer sees the true band on the listing (the
+    title and description are built from the raw size, not from this), and
+    the specific carries a real size so the listing is findable and eBay
+    accepts it.
+
+    An even-length band rounds DOWN, because a slightly roomy boot is
+    wearable and a tight one is a return."""
+    try:
+        low_i, high_i = valid_values.index(low), valid_values.index(high)
+    except ValueError:
+        return low
+    if high_i < low_i:
+        low_i, high_i = high_i, low_i
+    return valid_values[(low_i + high_i) // 2]
 
 
 def assumed_shoe_system(raw: str | None, brand=None) -> str | None:

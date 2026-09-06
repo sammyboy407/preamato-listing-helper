@@ -17,13 +17,19 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Optional
 
 from . import (brand_blurb, build, builtin_catalog, category_mapping, config,
                content_generator, data_loader, ebay_template, validation)
 from . import aspect_matching
 
-ProgressFn = Callable[[str, float | None], None]
+# Optional[float], not "float | None". This is a runtime expression, not an
+# annotation, so `from __future__ import annotations` does not defer it, and
+# PEP 604 unions in that position need Python 3.10. Sammy's Mac runs the
+# 3.9 that ships with Apple's Command Line Tools, so `import pipeline` blew
+# up there on 06.09.26 the first time a test imported this module — while
+# passing on every newer Python, including the one Streamlit Cloud runs.
+ProgressFn = Callable[[str, Optional[float]], None]
 
 # The API-generated department templates (see
 # scripts/fetch_ebay_category_aspects.py) — one per department, covering
@@ -65,6 +71,28 @@ def _per_template_output_path(base_output_path: str | Path, template_path: str |
     # their timestamp — can never produce the same output path.
     safe_stem = "".join(c if c.isalnum() or c in "-_" else "_" for c in template_stem)[:40]
     return base.with_name(f"{base.stem}__{index + 1}_{safe_stem}{base.suffix}")
+
+
+def _template_order(product, templates) -> list[int]:
+    """The order this product is offered to the templates.
+
+    Normally the order they were given in, which for the department defaults
+    is alphabetical. That put homeware ahead of menswear_shoes, so a Givenchy
+    lounge slipper filed as Lifestyle / Home Accessories was offered to
+    homeware first, matched Home Décor > Other Home Décor, and never reached
+    the shoes template. Sammy, 06.09.26: "shoes slippers need to go under
+    footwear."
+
+    So a product whose labels say homeware while its Department and customs
+    tariff code say footwear is offered the shoe templates first. Only first,
+    not exclusively: if every shoe template says no, the rest are still tried,
+    so nothing can be lost by this rule — the worst case is the order it had
+    before."""
+    order = list(range(len(templates)))
+    if not category_mapping.is_misfiled_footwear(product):
+        return order
+    shoes = [i for i in order if category_mapping.covers_footwear(templates[i])]
+    return shoes + [i for i in order if i not in shoes]
 
 
 @dataclass
@@ -175,8 +203,8 @@ def run(
     uncovered_skus: list[str] = []
     for p in products:
         match = None
-        for idx, (template, cat_cache) in enumerate(zip(templates, cat_caches)):
-            entry = category_mapping.lookup(cat_cache, p, template)
+        for idx in _template_order(p, templates):
+            entry = category_mapping.lookup(cat_caches[idx], p, templates[idx])
             if entry:
                 match = (idx, entry)
                 break

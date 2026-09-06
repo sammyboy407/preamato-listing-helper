@@ -80,6 +80,7 @@ def _sizing_sources() -> list:
     return [
         _resolve_size, _is_size_aspect,
         aspect_matching.enforce_title_size, aspect_matching.trim_title,
+        aspect_matching.middle_size,
         aspect_matching.match_shoe_size_uk, aspect_matching.match_shoe_size_eu,
         aspect_matching.match_size, aspect_matching.size_display,
         aspect_matching.size_display_for,
