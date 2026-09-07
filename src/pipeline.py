@@ -44,10 +44,35 @@ ProgressFn = Callable[[str, Optional[float]], None]
 DEFAULT_TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "data" / "templates"
 
 
+# Templates whose turn comes last. Sammy, 07.09.26: "we mainly sell mens and
+# womens so these departments should come before kids".
+#
+# Order matters because the first template whose mapping returns a match wins,
+# and the default templates were offered in plain alphabetical order, which put
+# kidswear ahead of menswear_shoes and womenswear_shoes. That is how seven
+# men's sneakers came to be asked against the kids category list at all.
+#
+# fix 26's gender guard already makes it impossible for an adult product to
+# land in a kids category, so this is not what stops that bug — it stops the
+# question being asked. Every adult product now meets its own department
+# first, which is one fewer AI call per combination and one less place for an
+# answer to come back different on a rebuilt cache.
+#
+# Kidswear is still offered, just last, so genuine kids stock is unaffected:
+# the three Boots / GIRL and the Moon Boot Kids reach it exactly as before,
+# because no adult template will take them (the same guard, in the other
+# direction).
+LAST_TEMPLATE_STEMS = ("kidswear",)
+
+
+def _template_rank(path: Path) -> tuple:
+    return (1 if path.stem.lower().startswith(LAST_TEMPLATE_STEMS) else 0, path.name)
+
+
 def _default_department_templates() -> list[Path]:
     if not DEFAULT_TEMPLATES_DIR.is_dir():
         return []
-    return sorted(DEFAULT_TEMPLATES_DIR.glob("*.json"))
+    return sorted(DEFAULT_TEMPLATES_DIR.glob("*.json"), key=_template_rank)
 
 
 def _noop(msg: str, frac: float | None = None) -> None:

@@ -876,6 +876,276 @@ def test_a_kids_listing_gets_a_department():
           ["Women", "Men", "Unisex Adults"])
 
 
+def _load_template(name):
+    from src import ebay_template
+    path = pathlib.Path(__file__).resolve().parent.parent / "data" / "templates" / name
+    if not path.exists():
+        return None
+    return ebay_template.load_template(path)
+
+
+def test_an_adult_product_can_never_be_listed_in_a_kids_category():
+    """07.09.26. Seven men's sneakers — LANVIN, AMIRI, OUR LEGACY, three RICK
+    OWENS DRKSHDW and a MIHARAYASUHIRO — came out of the app as
+    "Boys > Boys' Shoes" (57929), £795 designer trainers pointing at the
+    children's section.
+
+    Templates are offered alphabetically and kidswear comes before
+    menswear_shoes, so ("Footwear", "Sneakers", "MEN") was put to the model
+    against the kids list. On the 295-row batch it answered NONE; on a
+    rebuilt cache it answered Boys' Shoes. Nothing checked the answer.
+
+    So the check is deterministic and lives on both sides of the cache:
+    the candidate list the model sees is filtered first, and anything read
+    back out of a cache written before this rule existed is rejected on the
+    way out."""
+    from src import category_mapping
+
+    check("a men's product is not a kids product",
+          category_mapping.gender_conflict("MEN", "Boys > Boys' Shoes"), True)
+    check("nor a women's", category_mapping.gender_conflict("WOMEN", "Girls > Girls' Shoes"), True)
+    check("nor a unisex adult one",
+          category_mapping.gender_conflict("UNISEX", "Boys' Clothing (2-16 Years) > Jeans"), True)
+    check("and a kids product is not an adult one",
+          category_mapping.gender_conflict("GIRL", "Women's Shoes > Boots"), True)
+    check("nor a men's", category_mapping.gender_conflict("BOYS", "Men's Shoes > Trainers"), True)
+
+    # The crossings that must still be allowed, or real listings vanish.
+    for gender, name in [
+        ("MEN", "Men's Shoes > Trainers"),
+        ("WOMEN", "Women's Shoes > Heels"),
+        ("UNISEX", "Men's Shoes > Trainers"),
+        ("UNISEX", "Women's Shoes > Trainers"),
+        ("KIDS", "Boys > Boys' Shoes"),
+        ("GIRL", "Girls > Girls' Shoes"),
+        ("UNISEX KIDS", "Girls > Girls' Shoes"),
+        # Not blocked here on purpose: this account's templates force some
+        # men/women crossings (a woman's cufflinks have nowhere else to go),
+        # so that case is reported by validation instead of dropped.
+        ("WOMEN", "Men's Jewellery > Cufflinks"),
+        ("MEN", "Women's Shoes > Trainers"),
+        # No signal either way must never block.
+        ("MEN", "Home Décor > Other Home Décor"),
+        ("", "Boys > Boys' Shoes"),
+        ("MEN", ""),
+    ]:
+        check(f"{gender!r} in {name!r} is allowed",
+              category_mapping.gender_conflict(gender, name), False)
+
+    # "Women's" must not read as "men's". The word boundary does the work,
+    # but it is the kind of thing a later edit breaks silently.
+    check("Women's Accessories is a women's category",
+          category_mapping.category_audience("Women's Accessories > Belts"), "women")
+    check("Men's Accessories is a men's category",
+          category_mapping.category_audience("Men's Accessories > Belts"), "men")
+
+
+def test_a_kids_category_is_never_even_offered_to_an_adult():
+    """The guard above is the backstop. This is the part that stops the wrong
+    answer existing: the candidate list handed to the model is filtered by
+    age group before it is written, so "Boys' Shoes" is not on the menu for
+    a men's sneaker at all."""
+    from src import category_mapping
+
+    kidswear = _load_template("kidswear.json")
+    if kidswear is None:
+        print("  (skipped: data/templates not present in this checkout)")
+        return
+
+    check("a men's product is offered nothing at all from kidswear",
+          category_mapping.eligible_categories("MEN", kidswear), [])
+    check("nor a women's", category_mapping.eligible_categories("WOMEN", kidswear), [])
+    check("a kids product is offered the whole of it",
+          len(category_mapping.eligible_categories("GIRL", kidswear)),
+          len(kidswear.categories))
+
+    menswear = _load_template("menswear_shoes.json")
+    check("and menswear_shoes is untouched for a men's product",
+          len(category_mapping.eligible_categories("MEN", menswear)),
+          len(menswear.categories))
+    check("but closed to a kids product",
+          category_mapping.eligible_categories("BOY", menswear), [])
+
+
+def test_a_templates_unnamed_categories_inherit_its_age_group():
+    """kidswear.json carries thirteen "Activewear > ..." categories whose
+    names say nothing about who they are for. A name-only check would let a
+    men's tracksuit into "Activewear > Tracksuits & Sets" (260973) and never
+    notice. Every category in that file that says anything says Boys or
+    Girls, so the file itself settles it."""
+    from src import category_mapping
+
+    kidswear = _load_template("kidswear.json")
+    if kidswear is None:
+        print("  (skipped: data/templates not present in this checkout)")
+        return
+
+    check("the kidswear template as a whole is for kids",
+          category_mapping.template_audience(kidswear), "kids")
+    check("an unnamed kids category still blocks an adult",
+          category_mapping.gender_conflict("MEN", "Activewear > Tracksuits & Sets", kidswear),
+          True)
+    check("and the same category name in the menswear template does not",
+          category_mapping.gender_conflict(
+              "MEN", "Activewear > Tracksuits & Sets", _load_template("menswear_clothing.json")),
+          False)
+
+    # A mixed template must give no signal — jewellery_watches has both
+    # Men's Jewellery and Children's Jewellery, so inheriting from it would
+    # be a guess, and a guess here drops listings.
+    jewellery = _load_template("jewellery_watches.json")
+    check("a mixed template says nothing", category_mapping.template_audience(jewellery), None)
+    check("a neutral one says nothing either",
+          category_mapping.template_audience(_load_template("homeware.json")), None)
+
+
+def test_the_model_is_never_shown_a_category_it_must_not_choose():
+    """The filter is only worth anything if build_mapping actually applies
+    it. Testing eligible_categories on its own leaves the call site free to
+    stop using it — which is how strip_blocked_brand quietly stopped being
+    called on 06.09.26 with every unit test still green. So this one runs
+    build_mapping with the AI stubbed and reads the prompt it would have
+    sent."""
+    import tempfile
+    from src import ai_client, category_mapping
+
+    kidswear = _load_template("kidswear.json")
+    jewellery = _load_template("jewellery_watches.json")
+    if kidswear is None or jewellery is None:
+        print("  (skipped: data/templates not present in this checkout)")
+        return
+
+    mens = Product(
+        sku="QTN02-001-922",
+        master={"Brand": "LANVIN", "Gender": "MEN", "Category": "Footwear",
+                "SubCat2": "Sneakers", "Clean Title Description": "LANVIN CURB SNEAKER"},
+        measurements={"Size": "EU 44"},
+    )
+
+    prompts = []
+
+    def fake_ai(system, user, tool_name, input_schema, **kwargs):
+        prompts.append(user)
+        return {"category_id": "57929", "reasoning": "stub"}
+
+    original = ai_client.call_structured
+    ai_client.call_structured = fake_ai
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            cache = category_mapping.build_mapping(
+                [mens], kidswear, pathlib.Path(d) / "c.json")
+            check("no API call is made when nothing in the template is allowed",
+                  prompts, [])
+            entry = category_mapping.lookup(cache, mens, kidswear)
+            check("and the combo is recorded as a miss", entry, None)
+
+            prompts.clear()
+            category_mapping.build_mapping([mens], jewellery, pathlib.Path(d) / "j.json")
+            check("a partly-allowed template is still asked", len(prompts), 1)
+            check("but the kids categories are not in the prompt",
+                  "Children's Jewellery" in prompts[0], False)
+            check("and the men's ones still are",
+                  "Men's Jewellery" in prompts[0], True)
+    finally:
+        ai_client.call_structured = original
+
+
+def test_a_poisoned_category_cache_cannot_ship_a_kids_listing():
+    """The bug did not come from the code, it came from a cache: the same
+    combo answered NONE on 05.09.26 and "Boys' Shoes" on 07.09.26. Filtering
+    the candidate list fixes new answers; it does nothing about the
+    category_mapping_N.json already sitting in the cache directory. So the
+    guard is applied on the way out too, and lookup returning None is
+    exactly what sends the product on to the next template."""
+    from src import category_mapping
+
+    kidswear = _load_template("kidswear.json")
+    if kidswear is None:
+        print("  (skipped: data/templates not present in this checkout)")
+        return
+
+    product = Product(
+        sku="QTN02-001-922",
+        master={"Brand": "LANVIN", "Gender": "MEN", "Category": "Footwear",
+                "SubCat2": "Sneakers", "Clean Title Description": "LANVIN CURB SNEAKER"},
+        measurements={"Size": "EU 44"},
+    )
+    fp = category_mapping._template_fingerprint(kidswear)
+    poisoned = {
+        category_mapping._combo_key("Footwear", "Sneakers", "MEN", fp): {
+            "category_id": "57929",
+            "category_name": "Boys > Boys' Shoes",
+            "reasoning": "what the model actually answered on 07.09.26",
+        }
+    }
+    check("the cached kids answer is refused",
+          category_mapping.lookup(poisoned, product, kidswear), None)
+
+    # And the same cache still works for a product it is actually right for.
+    kid = Product(
+        sku="QTN02-000-001",
+        master={"Brand": "MOON BOOT", "Gender": "KIDS", "Category": "Footwear",
+                "SubCat2": "Sneakers", "Clean Title Description": "MOON BOOT ICON JUNIOR"},
+        measurements={"Size": "EU 30"},
+    )
+    kid_cache = {
+        category_mapping._combo_key("Footwear", "Sneakers", "KIDS", fp): {
+            "category_id": "57929", "category_name": "Boys > Boys' Shoes", "reasoning": ""}
+    }
+    entry = category_mapping.lookup(kid_cache, kid, kidswear)
+    check("a kids product still gets the kids category",
+          entry and entry.get("category_id"), "57929")
+
+
+def test_kidswear_is_offered_last():
+    """Sammy, 07.09.26: "we mainly sell mens and womens so these departments
+    should come before kids".
+
+    The first template whose mapping returns a match wins, and the defaults
+    were offered in plain alphabetical order — which put kidswear ahead of
+    menswear_shoes and womenswear_shoes, and is how a men's sneaker came to
+    be asked against the kids category list at all."""
+    from src import pipeline
+
+    names = [p.name for p in pipeline._default_department_templates()]
+    if not names:
+        print("  (skipped: data/templates not present in this checkout)")
+        return
+
+    check("kidswear is last", names[-1], "kidswear.json")
+    for adult in ("menswear_shoes.json", "womenswear_shoes.json",
+                  "menswear_clothing.json", "womenswear_clothing.json",
+                  "menswear_accessories.json", "womenswear_accessories.json"):
+        check(f"{adult} comes before kidswear", names.index(adult) < names.index("kidswear.json"), True)
+
+    # Nothing else is reordered. Moving kidswear is the whole change; a
+    # broader reshuffle would quietly move hair clips out of Costume
+    # Jewellery and into Women's Accessories, which nobody asked for.
+    others = [n for n in names if n != "kidswear.json"]
+    check("every other template keeps its alphabetical order", others, sorted(others))
+    check("and none of them is missing", len(names), 9)
+
+
+def test_a_mens_item_in_a_womens_category_is_reported():
+    """The half that is deliberately not blocked. Reported so a person
+    decides, because this account's templates force some crossings and a
+    silent drop would be worse than a listing in the wrong aisle."""
+    mens = Product(sku="TEST-001", master={"Brand": "SIMONE ROCHA", "Gender": "MEN"},
+                   measurements={})
+    issues = run(good_row(**{"Category name": "Women's Shoes > Trainers"}), product=mens, size="8")
+    check("the crossing is reported",
+          any("listed in" in m for m in messages(issues, "REVIEW")), True)
+
+    ok = run(good_row(**{"Category name": "Men's Shoes > Trainers"}), product=mens, size="8")
+    check("the right category is silent", messages(ok, "REVIEW"), [])
+    womens = run(good_row(**{"Category name": "Women's Shoes > Heels"}), size="8")
+    check("and a women's item in a women's category is silent",
+          messages(womens, "REVIEW"), [])
+    # No category name, no opinion.
+    check("and a row with no category name is silent",
+          messages(run(good_row(), size="8"), "REVIEW"), [])
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

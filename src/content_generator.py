@@ -121,6 +121,24 @@ def _sizing_fingerprint() -> str:
     parts.append(repr(aspect_matching.BARE_NUMBER_SHOE_SYSTEM))
     parts.append(repr(sorted(aspect_matching.US_SIZED_BRANDS)))
     parts.append(repr(sorted(aspect_matching.SIZE_ALIASES.items())))
+    # The compiled patterns and word lists the title functions read. These
+    # live at module level, so inspect.getsource on the functions above does
+    # not see them: without this, adding the singular "Men" to
+    # _TITLE_GENDER_RE on 07.09.26 would have changed what the app produces
+    # while leaving every cache key identical, and the doubled gender word
+    # would have survived the fix in the cache. Exactly the failure mode
+    # _sizing_sources exists to prevent, one level down.
+    parts.append(repr(sorted(aspect_matching.TITLE_GENDER_WORDS.items())))
+    parts.append(repr(sorted(aspect_matching.TITLE_BLOCKED_BRANDS)))
+    parts.append(repr(aspect_matching.BLOCKED_RETAILERS))
+    for pattern in (
+        aspect_matching._TITLE_GENDER_RE,
+        aspect_matching._TITLE_SIZE_RE,
+        aspect_matching._TITLE_BARE_CHILD_SIZE_RE,
+        aspect_matching._TITLE_RRP_RE,
+        aspect_matching._DANGLING_MARKER_RE,
+    ):
+        parts.append(pattern.pattern)
     return hashlib.sha256("".join(parts).encode()).hexdigest()[:12]
 
 

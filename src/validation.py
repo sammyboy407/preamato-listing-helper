@@ -102,6 +102,7 @@ def check_row(
     _check_assumed_size(sku, product, row, issues)
     _check_range_size(sku, product, row, issues)
     _check_misfiled_footwear(sku, product, row, issues)
+    _check_category_gender(sku, product, row, issues)
     _check_collaboration_title(sku, row, issues)
     _check_internal_references(sku, row, issues)
     _check_length_contradictions(sku, row, issues)
@@ -322,6 +323,33 @@ def _check_misfiled_footwear(sku, product, row, issues):
         f"{_text(product.m('Department'))}, so it is listed as "
         f"{_text(row.get('Category name'))}. Worth correcting in the Master File",
         group="Filed as homeware, listed as footwear"))
+
+
+def _check_category_gender(sku, product, row, issues):
+    """A listing whose category is for a different person than the product.
+
+    The kids/adult half of this is blocked outright before a row is ever
+    built (category_mapping.gender_conflict), so anything reported here is a
+    men's item in a women's category or the reverse. That one is not blocked,
+    because this account's templates genuinely force some crossings — a
+    woman's cufflinks have nowhere to go but Men's Jewellery > Cufflinks —
+    and dropping those silently would be worse than listing them. So it is
+    named instead, and a human decides.
+
+    07.09.26: seven men's sneakers were filed as Boys' Shoes. The kids case
+    can no longer happen; this is the same check kept live for the case that
+    can."""
+    from . import category_mapping
+    audience = category_mapping.product_audience(product.m("Gender"))
+    if audience not in ("men", "women"):
+        return
+    category_name = _text(row.get("Category name"))
+    listed = category_mapping.category_audience(category_name)
+    if listed in ("men", "women") and listed != audience:
+        issues.append(Issue(
+            sku, "REVIEW",
+            f"Gender says {_text(product.m('Gender'))} but it is listed in "
+            f"{category_name!r}"))
 
 
 def _check_range_size(sku, product, row, issues):

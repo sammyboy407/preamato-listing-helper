@@ -797,8 +797,18 @@ def enforce_title_size(title: str, size_for_display: str | None) -> str:
 # already in the title, no second one is added. "HOMME" is deliberately NOT
 # here: it appears inside the brand COMME DES GARCON HOMME PLUS, and treating
 # it as a gender word would silently skip those listings.
+# Words that already say who a listing is for. Singulars included, and they
+# were not: 07.09.26 shipped "LANVIN Mens Core Curb Sneaker White Leather
+# Trainers Men EU 44 RRP 795". The AI had written "Men" on the end, this
+# pattern only knew "Mens" and "Men's", so it saw no gender word and added
+# one of its own. Two gender words in one title reads as a mistake, which is
+# the exact thing enforce_title_gender declines to do further down.
+#
+# "men" cannot match inside "women": the boundary before it is closed by the
+# "o", so \b never opens there.
 _TITLE_GENDER_RE = re.compile(
-    r"\b(?:mens|men's|womens|women's|ladies|gents|unisex|boys|girls|kids)\b",
+    r"\b(?:mens|men's|men|womens|women's|women|man|woman|ladies|lady|gents|"
+    r"unisex|boys|boy|girls|girl|kids|childrens|children's|children|child)\b",
     re.IGNORECASE)
 
 # Master File Gender / eBay Department -> the word that goes in the title.

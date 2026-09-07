@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 from . import ai_client, ebay_template
@@ -92,6 +93,125 @@ def covers_footwear(template) -> bool:
     """Whether a template has any shoe category at all, so the pipeline can
     offer a misfiled slipper the shoes templates before the homeware one."""
     return any("shoes" in str(c.category_name or "").lower() for c in template.categories)
+
+
+# ---------------------------------------------------------------------------
+# Gender guard on the chosen category.
+#
+# 07.09.26: seven men's designer sneakers (LANVIN, AMIRI, OUR LEGACY, three
+# RICK OWENS DRKSHDW, MIHARAYASUHIRO) came out of the app filed as
+# "Boys > Boys' Shoes" (57929). Templates are offered in alphabetical order,
+# kidswear comes before menswear_shoes, and the combo
+# ("Footwear", "Sneakers", "MEN") was put to the model against the kidswear
+# candidate list. On the 295-row batch it had answered NONE for that same
+# combo; on a rebuilt cache it answered "Boys' Shoes" instead. One AI call,
+# a different answer, and men's £795 sneakers point at the children's
+# section.
+#
+# They did not actually ship wrong, because match_department refuses to write
+# "Men" into a Department list that only offers Boys and Unisex Kids, so
+# Department and Type came out empty and eBay would have rejected all seven
+# with 21919303. That is the safety net catching it at the door. This is the
+# rule that stops it happening at all, and it is deterministic: no AI answer,
+# on any run, can put an adult product in a kids category or a kids product
+# in an adult one.
+#
+# Deliberately limited to the kids/adult split. Men-in-womenswear and
+# vice versa is reported by validation but not blocked, because there are
+# real products that legitimately cross it — a woman's cufflinks have
+# nowhere to go but "Men's Jewellery > Cufflinks" in this account's
+# templates — and a hard block there would silently drop them.
+_KIDS_CATEGORY_RE = re.compile(
+    r"\b(?:boys?|girls?|kids?|child|children|childrens|children's|baby|babies|"
+    r"infant|infants|toddler|toddlers|newborn|junior|juniors)\b",
+    re.IGNORECASE)
+# "Women's" must not read as men's. \b saves us: the "men" inside "women"
+# is preceded by a word character, so the boundary never opens there.
+_MENS_CATEGORY_RE = re.compile(r"\bmen'?s?\b", re.IGNORECASE)
+_WOMENS_CATEGORY_RE = re.compile(r"\b(?:women'?s?|ladies)\b", re.IGNORECASE)
+
+KIDS_GENDERS = {
+    "GIRL", "GIRLS", "BOY", "BOYS", "KID", "KIDS", "CHILD", "CHILDREN",
+    "CHILDRENS", "UNISEX KIDS", "BABY", "INFANT", "TODDLER", "JUNIOR",
+}
+MENS_GENDERS = {"MEN", "MENS", "MAN", "MALE", "GENTS"}
+WOMENS_GENDERS = {"WOMEN", "WOMENS", "WOMAN", "LADIES", "LADY", "FEMALE"}
+UNISEX_GENDERS = {"UNISEX", "UNISEX ADULTS", "UNISEX ADULT"}
+
+
+def product_audience(gender) -> str | None:
+    """"kids", "men", "women", "unisex" or None for a Master File Gender."""
+    value = " ".join(str(gender or "").strip().upper().replace("'", "").split())
+    if not value:
+        return None
+    if value in KIDS_GENDERS:
+        return "kids"
+    if value in MENS_GENDERS:
+        return "men"
+    if value in WOMENS_GENDERS:
+        return "women"
+    if value in UNISEX_GENDERS:
+        return "unisex"
+    return None
+
+
+def category_audience(category_name) -> str | None:
+    """"kids", "men", "women" or None for an eBay category name."""
+    name = str(category_name or "")
+    if not name:
+        return None
+    if _KIDS_CATEGORY_RE.search(name):
+        return "kids"
+    if _WOMENS_CATEGORY_RE.search(name):
+        return "women"
+    if _MENS_CATEGORY_RE.search(name):
+        return "men"
+    return None
+
+
+def template_audience(template) -> str | None:
+    """The audience a whole template is for, when every category in it that
+    says anything says the same thing.
+
+    Needed because a template's category names are not all self-describing.
+    kidswear.json carries six "Activewear > ..." categories whose names give
+    no clue who they are for; without this, a men's tracksuit routed into
+    kidswear's "Activewear > Tracksuits & Sets" would sail straight past a
+    name-only check. Every named category in that file says Boys or Girls,
+    so the file as a whole is unambiguous.
+
+    Returns None for a mixed template (jewellery_watches has both Men's
+    Jewellery and Children's Jewellery) and for a neutral one (homeware),
+    which is the safe answer: no signal, no block."""
+    found = {category_audience(c.category_name) for c in template.categories}
+    found.discard(None)
+    return found.pop() if len(found) == 1 else None
+
+
+def effective_audience(category_name, template=None) -> str | None:
+    return category_audience(category_name) or (template_audience(template) if template is not None else None)
+
+
+def gender_conflict(gender, category_name, template=None) -> bool:
+    """True when this category is for a different age group than this product.
+
+    Adult (men/women/unisex) never goes in a kids category, and kids never
+    goes in an adult one. Everything else is allowed through here."""
+    pa = product_audience(gender)
+    ca = effective_audience(category_name, template)
+    if pa is None or ca is None:
+        return False
+    if pa == "kids":
+        return ca in ("men", "women")
+    return ca == "kids"
+
+
+def eligible_categories(gender, template):
+    """The categories in this template that this product's gender is allowed
+    to be put in. Used to build the candidate list before the model sees it,
+    so a wrong answer is never even available to give."""
+    return [c for c in template.categories
+            if not gender_conflict(gender, c.category_name, template)]
 
 
 SCHEMA = {
@@ -198,9 +318,13 @@ def build_mapping(
     changed = False
     template_fp = _template_fingerprint(template)
 
-    candidate_lines = "\n".join(
-        f"- {c.category_id}: {c.category_name}" for c in template.categories
-    )
+    def _candidates_for(gender):
+        """The candidate list this gender is allowed to be offered, and the
+        text of it. Built per gender rather than once for the template, so
+        the model is never shown a category it must not choose."""
+        allowed = eligible_categories(gender, template)
+        lines = "\n".join(f"- {c.category_id}: {c.category_name}" for c in allowed)
+        return allowed, lines
 
     combos = {
         (str(p.m("Category")), str(p.m("SubCat2")), str(p.m("Gender")))
@@ -211,14 +335,23 @@ def build_mapping(
         key = _combo_key(category, subcat2, gender, template_fp)
         if key in cache:
             continue
+        allowed, candidate_lines = _candidates_for(gender)
+        if not allowed:
+            # Every category in this template is for a different age group.
+            # Recorded as a miss without spending an API call on it.
+            cache[key] = {"category_id": None, "category_name": None,
+                          "reasoning": "No category in this template is for this age group."}
+            changed = True
+            print(f"  [category map] {category} / {subcat2} / {gender} -> NO MATCH in this template")
+            continue
         user = (
             f"Product's internal labels:\n"
             f"  Category: {category}\n"
             f"  SubCat2: {subcat2}\n"
             f"  Gender: {gender}\n\n"
-            f"Candidate eBay categories (this template's full coverage):\n{candidate_lines}"
+            f"Candidate eBay categories (this template's coverage for this age group):\n{candidate_lines}"
         )
-        cache[key] = _pick_category(SYSTEM_COMBO, user, template.categories)
+        cache[key] = _pick_category(SYSTEM_COMBO, user, allowed)
         changed = True
         status = f"{cache[key]['category_id']} ({cache[key]['category_name']})" if cache[key]['category_id'] else "NO MATCH in this template"
         print(f"  [category map] {category} / {subcat2} / {gender} -> {status}")
@@ -228,15 +361,22 @@ def build_mapping(
         key = _product_key(p.sku, template_fp)
         if key in cache:
             continue
+        allowed, candidate_lines = _candidates_for(p.m("Gender"))
+        if not allowed:
+            cache[key] = {"category_id": None, "category_name": None,
+                          "reasoning": "No category in this template is for this age group."}
+            changed = True
+            print(f"  [category map] {p.sku} -> NO MATCH in this template")
+            continue
         user = (
             f"Product's internal labels:\n"
             f"  Category: {p.m('Category')}\n"
             f"  SubCat2: {p.m('SubCat2')}\n"
             f"  Gender: {p.m('Gender')}\n"
             f"  Title: {p.m('Clean Title Description')}\n\n"
-            f"Candidate eBay categories (this template's full coverage):\n{candidate_lines}"
+            f"Candidate eBay categories (this template's coverage for this age group):\n{candidate_lines}"
         )
-        cache[key] = _pick_category(SYSTEM_PER_PRODUCT, user, template.categories)
+        cache[key] = _pick_category(SYSTEM_PER_PRODUCT, user, allowed)
         changed = True
         status = f"{cache[key]['category_id']} ({cache[key]['category_name']})" if cache[key]['category_id'] else "NO MATCH in this template"
         print(f"  [category map] {p.sku} ({p.m('Clean Title Description')}) -> {status}")
@@ -257,5 +397,16 @@ def lookup(cache: dict, product: Product, template: ebay_template.EbayTemplate) 
         entry = cache.get(_combo_key(category, subcat2, gender, template_fp))
 
     if not entry or not entry.get("category_id"):
+        return None
+
+    # Applied on the way out as well as on the way in. The candidate list is
+    # already filtered before the model sees it, but caches outlive code:
+    # a category_mapping_N.json written before this rule existed still holds
+    # the Boys' Shoes answer for ("Footwear", "Sneakers", "MEN"), and reading
+    # it back unchecked would ship exactly the listing this rule exists to
+    # stop. Rejecting it here also does the right thing at the pipeline
+    # level: lookup returning None sends the product on to the next template,
+    # which is where menswear_shoes picks it up.
+    if gender_conflict(gender, entry.get("category_name"), template):
         return None
     return entry

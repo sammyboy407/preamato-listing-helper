@@ -1194,6 +1194,89 @@ def test_an_unrecognised_country_code_is_spotted():
             FAILURES.append(f"{code} is in the Master File but has no country alias")
 
 
+def test_a_title_never_says_the_gender_twice():
+    """07.09.26 shipped "LANVIN Mens Core Curb Sneaker White Leather Trainers
+    Men EU 44 RRP 795".
+
+    The AI had written "Men" on the end. enforce_title_gender only knew the
+    plural and possessive spellings, saw no gender word, and put "Mens" in
+    after the brand. Two of them in one title reads as a mistake, which is
+    the exact thing the "already says it" branch exists to avoid."""
+    for existing, department in [
+        ("LANVIN Core Curb Sneaker White Leather Trainers Men EU 44 RRP 795", "MEN"),
+        ("TORY BURCH Eleanor Ballet Flat Black Women EU 38 RRP 395", "WOMEN"),
+        ("GUCCI Horsebit Loafer Black Leather Woman EU 38 RRP 695", "WOMEN"),
+        ("PRADA Monolith Boot Black Leather Man EU 44 RRP 995", "MEN"),
+        ("MOON BOOT Icon Junior Boot Pink Child EU 30 RRP 95", "MEN"),
+    ]:
+        check(f"no second gender word: {existing[:20]}...",
+              am.enforce_title_gender(existing, department, brand=existing.split()[0]),
+              existing)
+
+    # And the word is still added when the title genuinely does not say it.
+    # A rule that blocks everything is not a rule, it is an outage.
+    check("a title with no gender word still gets one",
+          am.enforce_title_gender("AMIRI Skel Top Low Sneaker Black Calf Leather EU 44 RRP 495",
+                                  "MEN", brand="AMIRI"),
+          "AMIRI Mens Skel Top Low Sneaker Black Calf Leather EU 44 RRP 495")
+
+    # The words that must NOT count as gender words, because they are parts
+    # of brand and model names this account actually stocks. Blocking on one
+    # of these would silently skip the gender word on every one of them.
+    for innocent in [
+        "MANOLO BLAHNIK Hangisi 90 Pump Blue Satin EU 38 RRP 745",
+        "OUR LEGACY Off Court Low Top Leather Sneaker White EU 44 RRP 345",
+        "GENTLE MONSTER Sunglasses Black Acetate RRP 295",
+        "MIHARAYASUHIRO Blakey Black Leather Low-Top Sneakers EU 41 RRP 445",
+        "WOMENSWEAR ARCHIVE Coat Navy Wool RRP 500",
+    ]:
+        out = am.enforce_title_gender(innocent, "MEN", brand=innocent.split()[0])
+        check(f"gender word still added to {innocent[:18]}...", "Mens" in out, True)
+
+
+def test_the_doubled_gender_word_cannot_be_re_served_from_cache():
+    """_TITLE_GENDER_RE lives at module level, so inspect.getsource on
+    enforce_title_gender does not see it. Without the pattern in the
+    fingerprint, fixing the doubled word would change what the app produces
+    while leaving every cache key identical — and every already-cached
+    listing would keep the old title. Same failure the function list was
+    written to prevent, one level down."""
+    import re as _re
+    from src import aspect_matching, content_generator
+
+    baseline = content_generator._sizing_fingerprint()
+    for name in ("_TITLE_GENDER_RE", "_TITLE_SIZE_RE", "_TITLE_BARE_CHILD_SIZE_RE",
+                 "_TITLE_RRP_RE", "_DANGLING_MARKER_RE"):
+        original = getattr(aspect_matching, name)
+        try:
+            setattr(aspect_matching, name, _re.compile(original.pattern + "|zzzz", _re.IGNORECASE))
+            check(f"changing {name} changes the cache fingerprint",
+                  content_generator._sizing_fingerprint() != baseline, True)
+        finally:
+            setattr(aspect_matching, name, original)
+
+    words_original = dict(aspect_matching.TITLE_GENDER_WORDS)
+    try:
+        aspect_matching.TITLE_GENDER_WORDS["ZZZ"] = "Zzz"
+        check("changing the gender word map changes the cache fingerprint",
+              content_generator._sizing_fingerprint() != baseline, True)
+    finally:
+        aspect_matching.TITLE_GENDER_WORDS.clear()
+        aspect_matching.TITLE_GENDER_WORDS.update(words_original)
+
+    blocked_original = set(aspect_matching.TITLE_BLOCKED_BRANDS)
+    try:
+        aspect_matching.TITLE_BLOCKED_BRANDS.add("ZZZ BRAND")
+        check("changing the blocked brand list changes the cache fingerprint",
+              content_generator._sizing_fingerprint() != baseline, True)
+    finally:
+        aspect_matching.TITLE_BLOCKED_BRANDS.clear()
+        aspect_matching.TITLE_BLOCKED_BRANDS.update(blocked_original)
+
+    check("fingerprint is stable when nothing changed",
+          content_generator._sizing_fingerprint(), baseline)
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
