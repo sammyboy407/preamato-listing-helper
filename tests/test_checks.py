@@ -815,6 +815,67 @@ def test_the_app_follows_the_brand_guidelines():
     check("and its logo too", "branding.logo_data_uri()" in app, True)
 
 
+def test_ebays_own_cardinality_wins():
+    """eBay error 21919309, 06.09.26: "Occasion should contain only one
+    value." One Women's Sandals listing refused, while four Women's Heels
+    listings in the same upload took two Occasions happily.
+
+    eBay's answer really is per category, and the templates carry it. The
+    bug was that MULTI_SELECT_ASPECTS overrode that answer instead of
+    filling in for a template that has none, which is what its own comment
+    said it was for."""
+    from src import content_generator as cg
+    from src.ebay_template import AspectSpec
+
+    ebay_says_single = AspectSpec("C:Occasion", "OPTIONAL", ["Casual", "Formal"], multi=False)
+    ebay_says_multi = AspectSpec("C:Occasion", "OPTIONAL", ["Casual", "Formal"], multi=True)
+    ebay_never_said = AspectSpec("C:Occasion", "OPTIONAL", ["Casual", "Formal"])
+
+    check("eBay saying single wins over the hand list",
+          cg._is_multi_select("C:Occasion", ebay_says_single), False)
+    check("eBay saying multi is honoured",
+          cg._is_multi_select("C:Occasion", ebay_says_multi), True)
+    check("the hand list still fills the gap for an xlsx template",
+          cg._is_multi_select("C:Occasion", ebay_never_said), True)
+    check("and an unknown aspect with no answer stays single",
+          cg._is_multi_select("C:Pattern", ebay_never_said), False)
+
+    # The real templates, the real categories, the real failure.
+    from src import ebay_template
+    templates = Path(__file__).resolve().parent.parent / "data" / "templates"
+    if (templates / "womenswear_shoes.json").exists():
+        t = ebay_template.load_template(templates / "womenswear_shoes.json")
+        sandals = t.aspects["62107"]["C:Occasion"]
+        heels = t.aspects["55793"]["C:Occasion"]
+        check("Women's Sandals takes one Occasion",
+              cg._is_multi_select("C:Occasion", sandals), False)
+        check("Women's Heels takes several",
+              cg._is_multi_select("C:Occasion", heels), True)
+
+
+def test_a_kids_listing_gets_a_department():
+    """eBay error 21919303, 06.09.26: "The item specific Department is
+    missing." Department is Required in every kids shoe category and the
+    gender map had no kids entries at all, so a Moon Boot Kids crib boot
+    went up with the field empty and was refused."""
+    from src import aspect_matching as am
+
+    kids = ["Girls", "Unisex Kids"]
+    boys = ["Boys", "Unisex Kids"]
+    check("GIRL maps to Girls", am.match_department("GIRL", kids), "Girls")
+    check("BOY maps to Boys", am.match_department("BOY", boys), "Boys")
+    check("KIDS maps to Unisex Kids", am.match_department("KIDS", kids), "Unisex Kids")
+    check("and the plural spellings too", am.match_department("GIRLS", kids), "Girls")
+
+    # A kids gender must never be forced into an adult list, and vice versa.
+    adults = ["Women", "Men", "Unisex Adults"]
+    check("GIRL is not a Women's department", am.match_department("GIRL", adults), None)
+    check("WOMEN is not a kids department", am.match_department("WOMEN", kids), None)
+    check("the adult mappings are untouched",
+          [am.match_department(g, adults) for g in ("WOMEN", "MEN", "UNISEX")],
+          ["Women", "Men", "Unisex Adults"])
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

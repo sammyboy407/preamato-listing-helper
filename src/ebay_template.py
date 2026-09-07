@@ -45,9 +45,17 @@ class AspectSpec:
     # rather than content_generator.MULTI_SELECT_ASPECTS's hand-maintained
     # guesswork (which is what an .xlsx-sourced template still has to rely
     # on, since the Seller Hub download has no column for this at all — see
-    # that module's docstring). Defaults to False so existing .xlsx-sourced
-    # templates behave exactly as before.
-    multi: bool = False
+    # that module's docstring). None means the template never said, which is
+    # every .xlsx-sourced one; False means eBay actively said single.
+    #
+    # The difference matters. It used to default to False, which is
+    # indistinguishable from a real "single" answer, so
+    # content_generator.MULTI_SELECT_ASPECTS had to OVERRIDE it rather than
+    # fill the gap — and that override sent "Casual|Party/Cocktail" into
+    # Women's Sandals, where eBay allows exactly one Occasion. Error
+    # 21919309, one rejected listing, 06.09.26. eBay's own per-category
+    # answer now wins wherever it exists.
+    multi: bool | None = None
     # eBay's own aspectMode: "FREE_TEXT" (values is a list of suggestions —
     # any other value is accepted too) or "SELECTION_ONLY" (values is a hard
     # closed list — anything else gets the listing rejected). None means
@@ -178,7 +186,9 @@ def load_json_template(path: str | Path) -> EbayTemplate:
                 name=name,
                 level=spec.get("level", "OPTIONAL"),
                 values=spec.get("values"),
-                multi=bool(spec.get("multi", False)),
+                # None when absent, so "eBay said single" and "nobody said"
+                # stay distinguishable.
+                multi=(None if spec.get("multi") is None else bool(spec["multi"])),
                 mode=spec.get("mode"),
             )
             for name, spec in cat_aspects.items()

@@ -70,6 +70,19 @@ GENDER_TO_DEPARTMENT = {
     "WOMEN": "Women",
     "MEN": "Men",
     "UNISEX": "Unisex Adults",
+    # Kids. eBay's kids categories offer Girls / Boys / Unisex Kids, and
+    # none of them were here, so a Moon Boot Kids crib boot went up with an
+    # empty Department and was refused outright: "The item specific
+    # Department is missing", error 21919303, 06.09.26. Department is
+    # Required in every kids shoe category.
+    "GIRL": "Girls",
+    "GIRLS": "Girls",
+    "BOY": "Boys",
+    "BOYS": "Boys",
+    "KIDS": "Unisex Kids",
+    "UNISEX KIDS": "Unisex Kids",
+    "CHILD": "Unisex Kids",
+    "CHILDREN": "Unisex Kids",
 }
 
 
@@ -348,6 +361,29 @@ def parse_shoe_size(raw: str | None, brand=None) -> tuple[str | None, str | None
     if prefix:
         return _normalise_size_marker(prefix), number
     return ("EU" if float(number) >= 33 else bare_number_system(brand)), number
+
+
+# Japanese shoe sizes are the length of the foot in centimetres, not a scale
+# number: an adult pair runs roughly 21 to 31, in 0.5cm steps. So a "JP 41"
+# is not a Japanese size at all — 41cm is not a foot.
+#
+# This exists because one arrived. QTN02-002-063, a Miharayasuhiro sneaker,
+# came through marked JP41 on 07.09.26 after the team started marking every
+# size with its country. The Master File records that same shoe as 41 and its
+# three siblings, 42, 43 and 44, are live on eBay as EU — so it was an EU size
+# with the wrong marker on it. There is no JP conversion table here yet,
+# deliberately: nothing in this account's data confirms one, and the last
+# thing a size needs is a table built from memory.
+JP_SIZE_CM_RANGE = (21.0, 31.0)
+
+
+def looks_like_japanese_size(number) -> bool:
+    """True when a JP-marked number is plausibly a real Japanese size, i.e.
+    a foot length in centimetres rather than a European scale number."""
+    try:
+        return JP_SIZE_CM_RANGE[0] <= float(number) <= JP_SIZE_CM_RANGE[1]
+    except (TypeError, ValueError):
+        return False
 
 
 def _normalise_size_marker(prefix: str) -> str:
@@ -681,19 +717,27 @@ def size_display_for(product, specifics, both=False, clothing_fallback=False):
 # ("UK 7", "EU45", "IT 40", "Sz 03", "Size 8"). Deliberately requires the
 # marker, so a bare number that isn't a size — a heel height ("20mm"), an
 # "RRP 395", a model name with digits — is never touched.
-# The trailing (?:\s*[-/\u2013]\s*\d+(?:\.\d+)?)? consumes the second half of a
-# range. Without it, "Snow Ankle Boots Size 2.5-3.5 RRP 195" lost only the
+# The trailing (?:\s*[-/\u2013]\s*\d+(?:\.\d+)?C?)? consumes the second half of a
+# range, and the C covers the US child scale. Without it, "Snow Ankle Boots Size 2.5-3.5 RRP 195" lost only the
 # "Size 2.5" and left an orphan "-3.5" behind, so the title shipped as
 # "Snow Ankle Boots -3.5 UK 2.5-3.5 RRP 195" (two Moon Boots, 05.09.26).
 _TITLE_SIZE_RE = re.compile(
     r"\b(?:UK|EU|EUR|US|USA|IT|FR|JP|Size|Sz)\s*\.?\s*"
-    r"(?:\d+(?:\.\d+)?(?:\s*[-/\u2013]\s*\d+(?:\.\d+)?)?"
+    r"(?:\d+(?:\.\d+)?C?(?:\s*[-/\u2013]\s*\d+(?:\.\d+)?C?)?"
     r"|(?:[2-9]?X{0,3}[SML]|One\s+Size)\b)",
     re.IGNORECASE,
 )
 # "RRP" not followed by a letter, so "RRP 245" and "RRP245" both count. The
 # \bRRP\b form missed "RRP245" (one GH Bass title, 06.09.26), so the trimmer
 # did not know that was the RRP tail, and dropped it to make room.
+# A child size with no marker in front of it. A bare number is normally left
+# alone in a title, because "20mm" and "RRP 395" are not sizes — but a number
+# with a C on it is nothing else, so it is stripped like any other size
+# mention. Without this, "Crib Boots Pink 2C" kept the AI's 2C and got the
+# resolved band put next to it.
+_TITLE_BARE_CHILD_SIZE_RE = re.compile(
+    r"\b\d+(?:\.\d+)?C(?:\s*[-/\u2013]\s*\d+(?:\.\d+)?C)?\b", re.IGNORECASE)
+
 _TITLE_RRP_RE = re.compile(r"\bRRP(?![A-Za-z]).*$", re.IGNORECASE)
 
 # A size marker with no number on it, sitting immediately before another size
@@ -729,6 +773,7 @@ def enforce_title_size(title: str, size_for_display: str | None) -> str:
     if not title:
         return title
     cleaned = _TITLE_SIZE_RE.sub(" ", title)
+    cleaned = _TITLE_BARE_CHILD_SIZE_RE.sub(" ", cleaned)
     cleaned = re.sub(r"\bOne\s+Size\b", " ", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
     if not size_for_display:

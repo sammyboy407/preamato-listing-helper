@@ -212,7 +212,17 @@ def _set_placeholder(specifics: dict, name: str, spec: ebay_template.AspectSpec)
 
 
 def _is_multi_select(name: str, spec: ebay_template.AspectSpec) -> bool:
-    return spec.multi or name in MULTI_SELECT_ASPECTS
+    """Whether eBay accepts more than one value here.
+
+    eBay's own per-category answer wins wherever the template has one.
+    MULTI_SELECT_ASPECTS only fills the gap for an .xlsx-sourced template,
+    which carries no cardinality at all — which is what it was always
+    documented to do, but `spec.multi or ...` made it an override instead,
+    and that override put two Occasions on a Women's Sandals listing eBay
+    then refused (error 21919309, 06.09.26)."""
+    if spec.multi is not None:
+        return spec.multi
+    return name in MULTI_SELECT_ASPECTS
 
 
 # Aspects with "Size" in the name that are NOT a size value at all, so must
@@ -850,6 +860,22 @@ def generate_for_product(
             elif not aspect_matching.looks_like_country_code(raw_country):
                 specifics["C:Country of Origin"] = raw_country
 
+    # Last guard on cardinality. Everything above should already have got
+    # this right, but a pipe in a single-value aspect is a hard rejection
+    # (error 21919309), and the cost of being wrong is a listing that does
+    # not exist. So any aspect eBay says is single keeps its first valid
+    # value and drops the rest, whatever produced them.
+    for name, value in list(specifics.items()):
+        if not isinstance(value, str) or "|" not in value:
+            continue
+        spec = (enum_specs.get(name) or hybrid_specs.get(name)
+                or multi_specs.get(name) or skipped.get(name))
+        if spec is None or _is_multi_select(name, spec):
+            continue
+        parts = [p.strip() for p in value.split("|") if p.strip()]
+        allowed = spec.values or []
+        specifics[name] = next((p for p in parts if not allowed or p in allowed), parts[0])
+
     result["item_specifics"] = specifics
 
     with _CACHE_LOCK:
@@ -894,6 +920,24 @@ def _size_failure_detail(name: str, product: Product, spec: ebay_template.Aspect
                 f"the Measurements file size {raw_size!r} is an {system} size outside the "
                 f"{'men' if gender == 'MEN' else 'women'}'s {system}->UK conversion table in "
                 f"aspect_matching.py — check the value, or extend the table if it's a real size."
+            )
+        if system == "JP":
+            # Japanese sizes are a foot length in centimetres, so the number
+            # itself says whether the marker is believable.
+            if not aspect_matching.looks_like_japanese_size(number):
+                low, high = aspect_matching.JP_SIZE_CM_RANGE
+                return (
+                    f"the Measurements file size {raw_size!r} is marked JP, but Japanese "
+                    f"shoe sizes are the foot length in centimetres and run about "
+                    f"{low:g} to {high:g} — {number} is outside that, so this is almost "
+                    f"certainly an EU size with the wrong marker on it. Check the box and "
+                    f"record it as 'EU {number}' if so."
+                )
+            return (
+                f"the Measurements file size {raw_size!r} is a genuine Japanese size "
+                f"({number}cm), but there is no JP conversion table yet — nothing in this "
+                f"account's history confirms one, and it will not be guessed. Record the "
+                f"UK or EU size from the box instead."
             )
         return (
             f"the Measurements file size {raw_size!r} isn't a recognisable shoe size "

@@ -250,6 +250,55 @@ def test_us_sizes_convert_by_gender():
     check("UK is not an EU size", am.match_shoe_size_eu("UK 9", ["9", "39", "40"]), None)
 
 
+def test_a_jp_marked_size_says_what_is_wrong_with_it():
+    """07.09.26. The team started marking every size with its country, which
+    is exactly right, and one came back as JP41.
+
+    Japanese shoe sizes are the foot length in centimetres, about 21 to 31.
+    There is no JP 41; 41cm is not a foot. The Master File records that same
+    Miharayasuhiro sneaker as 41 and its three siblings at 42, 43 and 44 are
+    live on eBay as EU, so it was an EU size with the wrong marker.
+
+    It is still refused, which is right — the app does not rewrite a marker
+    the team put there. What changed is that the run summary now says which
+    of the two problems it is, instead of "isn't a recognisable shoe size",
+    which was both wrong and useless."""
+    check("JP is parsed as its own scale, not folded into EU",
+          am.parse_shoe_size("JP41"), ("JP", "41"))
+    check("and a real one too", am.parse_shoe_size("JP 27"), ("JP", "27"))
+
+    for cm in ("21", "26.5", "27", "31"):
+        check(f"{cm}cm is a believable Japanese size",
+              am.looks_like_japanese_size(cm), True)
+    for not_cm in ("41", "44", "20.9", "31.1", "", None, "x"):
+        check(f"{not_cm!r} is not", am.looks_like_japanese_size(not_cm), False)
+
+    # It must still refuse to convert, with or without a plausible number.
+    uk_list = ["7", "7.5", "8", "8.5", "9", "9.5", "10"]
+    check("a JP size is not converted", am.match_shoe_size_uk("JP41", uk_list, "MEN"), None)
+    check("nor a plausible one", am.match_shoe_size_uk("JP 27", uk_list, "MEN"), None)
+    check("and never lands in the EU field",
+          am.match_shoe_size_eu("JP41", ["40", "41", "42"]), None)
+
+    # The two messages have to differ, and both have to be actionable.
+    from src import content_generator, ebay_template
+    from src.data_loader import Product
+    spec = ebay_template.AspectSpec("C:UK Shoe Size", "REQUIRED", uk_list)
+
+    def why(size):
+        product = Product(sku="T", master={"Brand": "MIHARAYASUHIRO", "Gender": "MEN"},
+                          measurements={"Size": size})
+        return content_generator._size_failure_detail("C:UK Shoe Size", product, spec)
+
+    wrong_marker = why("JP41")
+    check("an impossible JP number names the likely truth",
+          "wrong marker" in wrong_marker and "EU 41" in wrong_marker, True)
+    real_jp = why("JP 27")
+    check("a real one says there is no table yet",
+          "no JP conversion table" in real_jp, True)
+    check("and the two do not say the same thing", wrong_marker == real_jp, False)
+
+
 def test_a_kids_child_size_is_listable():
     """Sammy, 06.09.26: find a hard push for the kids Moon Boot, but keep the
     sizing in the title.
@@ -285,6 +334,22 @@ def test_a_kids_child_size_is_listable():
     check("3C has no table row", am.match_shoe_size_uk("3C", kids_uk, "GIRL"), None)
     check("nor does a band reaching it",
           am.match_shoe_size_uk("1C-3C", kids_uk, "GIRL"), None)
+
+    # The AI's own size mention has to be stripped first, C and all. It was
+    # not, so a real listing went out reading "Crib Boots Pink C-2C US
+    # 1C-2C RRP 95" — the strip took "Size 1" and left "C-2C" behind.
+    for written in ["MOON BOOT KIDS Baby Girl Crib Boots Pink Size 1C-2C RRP 95",
+                    "MOON BOOT KIDS Baby Girl Crib Boots Pink 1C-2C RRP 95",
+                    "MOON BOOT KIDS Baby Girl Crib Boots Pink 2C RRP 95",
+                    "MOON BOOT KIDS Baby Girl Crib Boots Pink US 2C RRP 95"]:
+        out = am.enforce_title_size(written, "US 1C-2C")
+        check(f"no stray C left in {written[-18:]!r}",
+              out, "MOON BOOT KIDS Baby Girl Crib Boots Pink US 1C-2C RRP 95")
+
+    # And a measurement that merely ends in a letter is not a size.
+    check("a heel height survives",
+          am.enforce_title_size("BRAND Boot Black 20mm Heel RRP 395", "UK 5"),
+          "BRAND Boot Black 20mm Heel UK 5 RRP 395")
 
     # The band is what the buyer sees, because it is what the box says.
     title = am.size_display("1C-2C", uk_shoe="1", eu_shoe="17")
@@ -883,6 +948,10 @@ def test_changing_a_sizing_rule_invalidates_the_cache():
         # alongside the size — so a change to either has to invalidate the
         # cache exactly as a sizing change does. Added 06.09.26.
         "enforce_title_gender", "title_gender_word", "_drop_dangling_markers",
+        # looks_like_japanese_size is deliberately NOT here. It only
+        # decides the wording of a failure message for a product that is
+        # skipped either way, so it cannot change a cached size, and
+        # hashing it would bust the whole cache for a reworded sentence.
         "child_band_size",
         "strip_blocked_brand", "collaborating_brand",
     }
