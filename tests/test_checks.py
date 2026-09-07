@@ -1146,6 +1146,149 @@ def test_a_mens_item_in_a_womens_category_is_reported():
           messages(run(good_row(), size="8"), "REVIEW"), [])
 
 
+def test_a_row_ebay_would_refuse_never_reaches_the_upload_file():
+    """07.09.26, the second half of it. Seven men's sneakers went out with an
+    empty Department and Type. Every one was flagged REVIEW in the checks
+    report, the report was scrolled past on a run that otherwise looked
+    clean, and eBay refused all seven an hour later with 21919303.
+
+    The information was there. It just was not in the way. So a row eBay will
+    refuse is now kept OUT of the upload file entirely and written to a
+    "NEEDS ATTENTION" file with the reason beside it, which makes the file
+    the app hands over a file that uploads clean.
+
+    Run through pipeline.run rather than validation, because the check
+    marking a row blocking is worth nothing if the pipeline still writes it.
+    That is the exact mutation that got strip_blocked_brand on 06.09.26."""
+    import csv as _csv
+    import tempfile
+    from src import ai_client, brand_blurb, data_loader, pipeline
+
+    templates_dir = pathlib.Path(__file__).resolve().parent.parent / "data" / "templates"
+    if not (templates_dir / "menswear_shoes.json").exists():
+        print("  (skipped: data/templates not present in this checkout)")
+        return
+
+    def make(sku, images):
+        return Product(
+            sku=sku,
+            master={"Brand": "ROA", "Gender": "MEN", "Colour": "Brown",
+                    "Category": "Footwear", "SubCat2": "Boots", "Rounded RRP": 395,
+                    "Country of Origin": "ITA", "Clean Title Description": "ROA HIKING BOOT"},
+            measurements={"Size": "EU 45", "Description": "Good condition.",
+                          "Images 2D link": images},
+        )
+
+    good = make("GOOD-001", "http://a|http://b|http://c")
+    bad = make("BAD-001", "")   # no photos: eBay refuses this outright
+
+    def fake_ai(system, user, tool_name, input_schema, **kwargs):
+        if tool_name == "pick_category":
+            return {"category_id": "11498", "reasoning": "stub"}
+        props = input_schema["properties"]["item_specifics"]["properties"]
+        required = set(input_schema["properties"]["item_specifics"].get("required", []))
+        specifics = {}
+        for name, spec in props.items():
+            if name not in required:
+                continue
+            if spec.get("type") == "array":
+                specifics[name] = spec["items"]["enum"][:1]
+            elif "enum" in spec:
+                specifics[name] = spec["enum"][0]
+            else:
+                specifics[name] = "Leather"
+        return {
+            "title": "ROA Hiking Boots Brown Suede EU 45 RRP 395",
+            "condition_id": 3000,
+            "condition_description": "Good condition.",
+            "material_summary": "Suede",
+            "item_specifics": specifics,
+        }
+
+    originals = (ai_client.call_structured, data_loader.load_products, brand_blurb.build_blurbs)
+    ai_client.call_structured = fake_ai
+    data_loader.load_products = lambda *a, **k: [good, bad]
+    brand_blurb.build_blurbs = lambda brands, cache_dir: {b: "" for b in brands}
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            out = pathlib.Path(d) / "Upload.csv"
+            results, considered, uncovered, failed, held = pipeline.run(
+                master_path="unused", measurements_path="unused",
+                template_path=[str(templates_dir / "menswear_shoes.json")],
+                output_path=out, cache_dir=d, force_regenerate=True,
+            )
+
+            check("the bad row is held back", [s for s in held.skus], ["BAD-001"])
+            check("with a reason a person can act on",
+                  any("photo" in r for _sku, rs in held.reasons for r in rs), True)
+
+            rows = [tr.rows for tr in results]
+            written = [r["Custom label (SKU)"] for group in rows for r in group]
+            check("only the good row is in the upload file", written, ["GOOD-001"])
+
+            # Not just the in-memory rows — the file on disk, which is what
+            # actually gets uploaded.
+            lines = out.read_text(encoding="utf-8-sig").splitlines()
+            hi = next(i for i, l in enumerate(lines) if l.startswith("*Action"))
+            on_disk = [r["Custom label (SKU)"] for r in _csv.DictReader(lines[hi:])]
+            check("and the file on disk agrees", on_disk, ["GOOD-001"])
+
+            held_file = pathlib.Path(held.path)
+            check("the needs-attention file exists", held_file.exists(), True)
+            hlines = held_file.read_text(encoding="utf-8-sig").splitlines()
+            hhi = next(i for i, l in enumerate(hlines) if l.startswith("*Action"))
+            hrows = list(_csv.DictReader(hlines[hhi:]))
+            check("it holds the refused row", [r["Custom label (SKU)"] for r in hrows], ["BAD-001"])
+            check("with the reason in its own column",
+                  "photo" in hrows[0]["WHY THIS ROW IS HELD BACK"], True)
+
+            # The report has to say it too, in the counts at the top, since
+            # that is the part people actually read.
+            report = out.with_name(out.stem + "_checks.txt").read_text()
+            check("the report names it in the counts", "1 held back" in report, True)
+            check("and lists the SKU", "BAD-001" in report, True)
+    finally:
+        (ai_client.call_structured, data_loader.load_products,
+         brand_blurb.build_blurbs) = originals
+
+
+def test_only_the_problems_ebay_actually_refuses_are_blocking():
+    """A guard that holds back rows for things eBay would have accepted is
+    worse than no guard: it turns a clean run into a pile of files to
+    reconcile, and the next real one gets ignored with the rest.
+
+    So the blocking set is exactly the failures that have been refused, with
+    the error code in each check's docstring. Everything else is still
+    reported and still ships."""
+    aspects = {"C:Brand": AspectSpec("C:Brand", "REQUIRED", None)}
+
+    # Blocking: eBay refuses each of these outright.
+    for label, row, aspect_set in [
+        ("missing REQUIRED aspect (21919303)", good_row(), aspects),
+        ("no title", good_row(Title=""), None),
+        ("no photos", good_row(**{"Item photo URL": ""}), None),
+        ("zero price", good_row(**{"Start price": 0}), None),
+    ]:
+        issues = run(row, aspects=aspect_set, size="8")
+        check(f"{label} blocks the row", bool(validation.blocking_reasons(issues)), True)
+
+    # Reported, not blocked. Each of these has shipped and listed fine.
+    for label, row, product in [
+        ("only two photos", good_row(**{"Item photo URL": "http://a|http://b"}), None),
+        ("title missing the brand", good_row(Title="Tiered Mini Skirt White 8 RRP 695"), None),
+        ("a men's item in a women's category",
+         good_row(**{"Category name": "Women's Shoes > Trainers"}),
+         Product(sku="TEST-001", master={"Brand": "SIMONE ROCHA", "Gender": "MEN"}, measurements={})),
+        ("a contradiction between Style and Length",
+         good_row(**{"C:Skirt Length": "Maxi"}), None),
+    ]:
+        issues = run(row, product=product, size="8")
+        check(f"{label} does not block the row", validation.blocking_reasons(issues), [])
+
+    # And a clean row blocks nothing, which is the case that matters most.
+    check("a clean listing blocks nothing", validation.blocking_reasons(run(good_row(), size="8")), [])
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

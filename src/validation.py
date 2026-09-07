@@ -72,9 +72,27 @@ class Issue:
     kind: str  # "FIX", "REVIEW" or "NOTE"
     message: str
     group: str | None = None  # NOTE only: the heading these are collected under
+    # Whether eBay will refuse this listing outright. Set only on the
+    # problems that have actually been refused by eBay, with the error code
+    # in the check's docstring. A blocking row never reaches the upload file
+    # — see pipeline.run and blocking_reasons below.
+    #
+    # 07.09.26 is why this exists. Seven men's sneakers went out with an
+    # empty Department and Type, every one of them flagged REVIEW in the
+    # report, and the report was scrolled past on a run that otherwise
+    # looked clean. eBay refused all seven an hour later with 21919303. The
+    # information was there; it just was not in the way. Now the file the
+    # app hands over is a file eBay will accept, and anything it will not
+    # accept is in a separate file with the reason next to it.
+    blocking: bool = False
 
     def __str__(self) -> str:
         return f"[{self.kind}] {self.sku}: {self.message}"
+
+
+def blocking_reasons(issues: list["Issue"]) -> list[str]:
+    """The messages of every blocking issue in this row's issue list."""
+    return [i.message for i in issues if i.blocking]
 
 
 def _text(value) -> str:
@@ -121,13 +139,16 @@ def _check_required_aspects(sku, row, aspects, issues):
         if spec.level == "REQUIRED" and not _text(row.get(name))
     ]
     for name in sorted(missing):
-        issues.append(Issue(sku, "REVIEW", f"{name} is required by eBay for this category but is empty — eBay will reject this listing"))
+        issues.append(Issue(
+            sku, "REVIEW",
+            f"{name} is required by eBay for this category but is empty",
+            blocking=True))
 
 
 def _check_title(sku, row, product, size_for_display, issues):
     title = _text(row.get("Title"))
     if not title:
-        issues.append(Issue(sku, "REVIEW", "no title"))
+        issues.append(Issue(sku, "REVIEW", "no title", blocking=True))
         return
 
     if len(title) > MAX_TITLE_LENGTH:
@@ -155,7 +176,7 @@ def _check_title(sku, row, product, size_for_display, issues):
 def _check_photos(sku, row, issues):
     urls = [u for u in _text(row.get("Item photo URL")).split("|") if u.strip()]
     if not urls:
-        issues.append(Issue(sku, "REVIEW", "no photos — eBay will reject this listing"))
+        issues.append(Issue(sku, "REVIEW", "no photos", blocking=True))
     elif len(urls) < 3:
         issues.append(Issue(sku, "REVIEW", f"only {len(urls)} photo(s)"))
 
@@ -164,7 +185,8 @@ def _check_price(sku, row, issues):
     try:
         price = float(_text(row.get("Start price")) or 0)
     except ValueError:
-        issues.append(Issue(sku, "REVIEW", f"start price isn't a number: {row.get('Start price')!r}"))
+        issues.append(Issue(sku, "REVIEW", f"start price isn't a number: {row.get('Start price')!r}",
+                            blocking=True))
         return
     try:
         rrp = float(_text(row.get("OriginalRetailPrice")) or 0)
@@ -172,7 +194,7 @@ def _check_price(sku, row, issues):
         rrp = 0.0
 
     if price <= 0:
-        issues.append(Issue(sku, "REVIEW", "start price is zero or missing"))
+        issues.append(Issue(sku, "REVIEW", "start price is zero or missing", blocking=True))
     elif rrp and price > rrp:
         issues.append(Issue(sku, "REVIEW", f"start price £{price:.0f} is above the RRP of £{rrp:.0f}"))
 

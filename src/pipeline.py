@@ -121,6 +121,25 @@ def _template_order(product, templates) -> list[int]:
 
 
 @dataclass
+class HeldBack:
+    """The rows eBay would refuse, kept out of the upload file.
+
+    Returned as its own object rather than a fifth loose tuple element of
+    strings, because the caller has to be able to show the reason next to
+    the SKU: "QTN02-001-922: C:Department is required by eBay for this
+    category but is empty" is actionable, "7 rows failed" is not."""
+    skus: list[str] = field(default_factory=list)
+    reasons: list = field(default_factory=list)   # [(sku, [reason, ...]), ...]
+    path: str | None = None
+
+    def __bool__(self) -> bool:
+        return bool(self.skus)
+
+    def __len__(self) -> int:
+        return len(self.skus)
+
+
+@dataclass
 class TemplateResult:
     template_path: str
     output_path: str
@@ -143,11 +162,12 @@ def run(
     on_progress: ProgressFn = _noop,
 ) -> tuple[list[TemplateResult], int, list[str], list[str]]:
     """Runs the full pipeline. Returns (template_results, num_products_considered,
-    uncovered_skus, failed) — uncovered_skus lists products whose (Category,
-    SubCat2, Gender) doesn't match any category in ANY of the given templates,
-    and failed lists "SKU: reason" for every product that was dropped during
-    generation (an unresolvable Required size, an API error that survived its
-    retries).
+    uncovered_skus, failed, held_back) — uncovered_skus lists products whose
+    (Category, SubCat2, Gender) doesn't match any category in ANY of the given
+    templates, failed lists "SKU: reason" for every product that was dropped
+    during generation (an unresolvable Required size, an API error that
+    survived its retries), and held_back is the rows eBay would refuse, which
+    are written to their own file instead of the upload file.
 
     Both are returned rather than only logged: on a 6-row test run a skipped
     SKU is obvious, but on a 295-row batch the log line scrolls away and the
@@ -251,7 +271,7 @@ def run(
             "None of the matched products fall into a category covered by any given "
             "template — no output file produced.", 1.0
         )
-        return [], 0, uncovered_skus, []
+        return [], 0, uncovered_skus, [], HeldBack()
 
     brands = {str(p.m("Brand")) for p, _, _ in assignments if p.m("Brand")}
     on_progress(f"Building brand descriptions for {len(brands)} brand(s)...", 0.2)
@@ -292,6 +312,10 @@ def run(
     on_progress("Assembling output rows...", 0.92)
     results_by_template: dict[int, TemplateResult] = {}
     issues: list[validation.Issue] = []
+    # Rows eBay would refuse. Kept out of the upload file entirely and
+    # written to their own file instead — see validation.Issue.blocking.
+    held: list[tuple[int, dict, list[str]]] = []   # (template_idx, row, reasons)
+    held_skus: list[str] = []
     for p, idx, entry in assignments:
         if p.sku not in ai_results:
             continue
@@ -305,10 +329,20 @@ def run(
         # an empty REQUIRED item specific, a title that lost its size, a
         # listing that contradicts itself, a mistyped measurement.
         specifics = ai_results[p.sku].get("item_specifics", {})
-        issues.extend(validation.check_row(
+        row_issues = validation.check_row(
             p, row, category, template,
             size_for_display=aspect_matching.size_display_for(p, specifics),
-        ))
+        )
+        issues.extend(row_issues)
+
+        # A row eBay will refuse does not go in the upload file. It goes in
+        # the needs-attention file with its reasons, so that what the app
+        # hands over is a file that uploads clean.
+        reasons = validation.blocking_reasons(row_issues)
+        if reasons:
+            held.append((idx, row, reasons))
+            held_skus.append(p.sku)
+            continue
 
         if idx not in results_by_template:
             results_by_template[idx] = TemplateResult(
@@ -376,6 +410,35 @@ def run(
             on_progress(f"Wrote {len(tr.rows)} rows to {tr.output_path}", None)
             template_results.append(tr)
 
+    # The rows eBay would refuse, in their own file, with the reason in a
+    # column of its own. Same shape as the upload file — the #INFO preamble,
+    # the same headers — so once the underlying data is fixed it can be
+    # uploaded as-is, minus the WHY column, which eBay ignores anyway
+    # because it is not one of its fields.
+    held_path = None
+    if held:
+        held_rows = []
+        held_headers: list[str] = []
+        for idx, row, reasons in held:
+            annotated = dict(row)
+            annotated["WHY THIS ROW IS HELD BACK"] = "; ".join(reasons)
+            held_rows.append(annotated)
+            for h in templates[idx].listing_headers:
+                if h not in held_headers:
+                    held_headers.append(h)
+        held_template = ebay_template.EbayTemplate(
+            listing_headers=held_headers,
+            categories=[],
+            aspects={},
+            info_rows=templates[held[0][0]].info_rows,
+        )
+        base = Path(output_path)
+        held_path = base.with_name(f"{base.stem} NEEDS ATTENTION{base.suffix}")
+        build.write_csv(held_rows, held_template, held_path)
+        on_progress(
+            f"{len(held)} row(s) eBay would refuse were kept OUT of the upload file "
+            f"and written to {held_path.name} instead.", None)
+
     # The checks report goes next to the CSV as well as into the run log, so
     # it can be read after the fact rather than scrolled back to.
     # The report opens with a reconciliation the numbers have to satisfy —
@@ -392,9 +455,20 @@ def run(
         header.append(f"  {len(uncovered_skus)} skipped: no template covers their category")
     if errors:
         header.append(f"  {len(errors)} skipped: failed during generation (listed below)")
-    if not uncovered_skus and not errors and rows_out == len(products):
+    if held:
+        header.append(f"  {len(held)} held back: eBay would refuse them (listed below)")
+    if not uncovered_skus and not errors and not held and rows_out == len(products):
         header.append("  Nothing was dropped.")
     header.append("")
+
+    if held:
+        header.append(
+            f"HELD BACK ({len(held)}) — these are NOT in the upload file. They are in "
+            f"{Path(held_path).name} with the reason in the last column. Fix the "
+            f"underlying data and re-run; do not upload them as they are:")
+        for _idx, row, reasons in held:
+            header.append(f"  {row.get('Custom label (SKU)')}: {'; '.join(reasons)}")
+        header.append("")
 
     if errors:
         header.append(f"SKIPPED DURING GENERATION ({len(errors)}) — these are NOT in the CSV:")
@@ -431,4 +505,8 @@ def run(
 
     on_progress(f"Done — {len(template_results)} output file(s) written.", 1.0)
 
-    return template_results, len(assignments), uncovered_skus, errors
+    return template_results, len(assignments), uncovered_skus, errors, HeldBack(
+        skus=held_skus,
+        reasons=[(str(row.get("Custom label (SKU)")), rs) for _idx, row, rs in held],
+        path=str(held_path) if held_path else None,
+    )

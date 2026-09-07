@@ -378,7 +378,7 @@ if run_clicked:
                 progress_bar.progress(min(max(frac, 0.0), 1.0))
 
         try:
-            results, considered, uncovered, failed = pipeline.run(
+            results, considered, uncovered, failed, held_back = pipeline.run(
                 master_path=master_paths,
                 measurements_path=measurements_paths,
                 template_path=template_paths,
@@ -411,8 +411,29 @@ if run_clicked:
             # back short and look like a success.
             st.info(
                 f"{considered} product(s) processed, {total_rows} listing(s) written, "
-                f"{len(failed) + len(uncovered)} not listed."
+                f"{len(failed) + len(uncovered) + len(held_back)} not listed."
             )
+            # First, and in red. These are the rows eBay would refuse, and
+            # they are deliberately NOT in the file that was just written —
+            # so the download button above is safe to upload as it stands.
+            if held_back:
+                st.error(
+                    f"{len(held_back)} listing(s) would be refused by eBay and have been "
+                    f"KEPT OUT of the upload file. The file above is safe to upload as it is. "
+                    f"These need fixing at source and re-running:"
+                )
+                for sku, reasons in held_back.reasons:
+                    st.markdown(f"- **{sku}** — {'; '.join(reasons)}")
+                if held_back.path and Path(held_back.path).exists():
+                    with open(held_back.path, "rb") as f:
+                        st.download_button(
+                            f"Download {Path(held_back.path).name}",
+                            f,
+                            file_name=Path(held_back.path).name,
+                            mime="text/csv",
+                            use_container_width=True,
+                            key="held_back_download",
+                        )
             if failed:
                 st.error(
                     f"{len(failed)} product(s) failed and are NOT in the file. "
