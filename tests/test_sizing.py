@@ -1650,6 +1650,168 @@ def test_the_colour_is_read_off_the_photograph():
     check("a text-only call sends plain text", sent["messages"][0]["content"], "u")
 
 
+def test_an_unlistable_clothing_size_is_refused_not_shipped():
+    """08.09.26, error 21920468 on eight of twenty-eight garments: "3" is
+    not a valid value for Size, and neither were 38, 40, 48, 50 or MM.
+
+    Those bare numbers used to be written through untouched, on the evidence
+    of the account's Optiseller-era uploads, which put 46, 39 and "33/32"
+    straight into C:Size and were accepted. eBay no longer accepts that on
+    these categories, so passing a size through stopped being a harmless
+    best effort and became a refused listing — and, because eBay refuses the
+    whole file, a refused batch.
+
+    The sizes are real. A Moncler 3 is a size, an Alexander McQueen 38 is a
+    size. They just need their scale said out loud, which is what eBay's own
+    lists carry: IT 38, FR 38, EU 48."""
+    from src import content_generator, ebay_template
+    from src.data_loader import Product
+
+    coats = ["2XS", "XS", "S", "M", "L", "XL", "IT 46", "IT 48", "IT 50",
+             "EU 46", "EU 48", "EU 50", "FR 48", "One Size"]
+
+    def resolve(raw, values):
+        product = Product(
+            sku="TEST-001",
+            master={"Brand": "OUR LEGACY", "Gender": "MEN"},
+            measurements={"Size": raw},
+        )
+        spec = ebay_template.AspectSpec("C:Size", "REQUIRED", values)
+        return content_generator._resolve_size("C:Size", product, spec)
+
+    for raw in ("3", "48", "50", "MM", "38", "40"):
+        check(f"{raw!r} is refused rather than shipped", resolve(raw, coats), None)
+
+    # Marked, it lists. This is the whole point: the fix is a marker, not a
+    # conversion table built from memory.
+    check("IT 48 lists", resolve("48 IT", coats), "IT 48")
+    check("EU 50 lists", resolve("50 EU", coats), "EU 50")
+    check("and a letter size was never a problem", resolve("M", coats), "M")
+
+    # Where eBay offers no list at all, the measured size still goes through
+    # untouched — that path is unchanged and 295 shoe listings depend on
+    # nothing about it moving.
+    check("no list, the raw size still ships", resolve("33/32", []), "33/32")
+    check("and a blank is still a blank", resolve("", []), None)
+
+    # The message a person actually reads has to say what to do about it.
+    product = Product(sku="TEST-001", master={"Brand": "MIU MIU", "Gender": "WOMEN"},
+                      measurements={"Size": "40"})
+    detail = content_generator._size_failure_detail(
+        "C:Size", product, ebay_template.AspectSpec("C:Size", "REQUIRED", coats))
+    check("the message names the size", "'40'" in detail, True)
+    check("and the scales this category takes", "EU" in detail and "IT" in detail, True)
+    check("and says it will not be guessed", "guessed" in detail, True)
+
+def test_the_title_carries_the_colour_the_listing_carries():
+    """08.09.26: three of the first thirty garments went out reading
+    "Neutral" in the title while the item specific said Beige. Nobody
+    searches eBay for neutral.
+
+    The colour is now resolved before the model is asked anything, exactly
+    as the size is, and handed over — and then enforced, because a prompt
+    instruction has never once been a guarantee in this codebase."""
+    check("the family word becomes the listed colour",
+          am.enforce_title_colour(
+              "HIKING PATROL Mens Base LT Down Hooded Jacket Neutral XS Puffer RRP 245", "Beige"),
+          "HIKING PATROL Mens Base LT Down Hooded Jacket Beige XS Puffer RRP 245")
+    check("plural too",
+          am.enforce_title_colour("SOME BRAND Coat Neutrals 38 RRP 500", "Beige"),
+          "SOME BRAND Coat Beige 38 RRP 500")
+
+    # A title that already carries the colour loses the family word rather
+    # than saying it twice.
+    check("no duplicate colour word",
+          am.enforce_title_colour("SOME BRAND Neutral Coat Beige Wool 38 RRP 500", "Beige"),
+          "SOME BRAND Coat Beige Wool 38 RRP 500")
+
+    # And everything else is left completely alone. A shade name a
+    # copywriter chose is a better title than a flattened one; only the
+    # family words are actively useless.
+    for title, colour in [
+        ("CANADA GOOSE Mens Crofton Jacket Black Down Puffer XL RRP 795", "Black"),
+        ("BALMAIN Womens Tweed Mini Skirt Beige Buttoned 34 RRP 1445", "Beige"),
+        ("SOME BRAND Ecru Linen Shirt M RRP 200", "Beige"),
+        # Metallic is a real description of a real finish, and the resolved
+        # Gold almost always sits beside it.
+        ("MIU MIU Womens Metallic Leather Sandal Gold 38 RRP 950", "Gold"),
+    ]:
+        check(f"left alone: {title[:22]}...", am.enforce_title_colour(title, colour), title)
+
+    # Nothing to swap in means nothing is swapped out.
+    check("no colour, no change",
+          am.enforce_title_colour("SOME BRAND Neutral Coat 38 RRP 500", None),
+          "SOME BRAND Neutral Coat 38 RRP 500")
+    check("no title, no crash", am.enforce_title_colour("", "Beige"), "")
+
+    # It has to survive the whole pipeline, not just exist as a function.
+    import tempfile
+    from src import ai_client, content_generator, ebay_template
+    from src.data_loader import Product
+
+    templates_dir = Path(__file__).resolve().parent.parent / "data" / "templates"
+    womens = templates_dir / "womenswear_clothing.json"
+    if not womens.exists():
+        print("  (skipped end-to-end colour title check: data/templates not present)")
+        return
+
+    template = ebay_template.load_template(womens)
+    category = template.category_by_id("63862")
+    product = Product(
+        sku="QTN02-001-543",
+        master={"Brand": "FRANKIE SHOP", "Gender": "WOMEN", "Colour": "Neutrals",
+                "Category": "Ready to Wear", "SubCat2": "Coats", "Rounded RRP": 295,
+                "Clean Title Description": "FRANKIE SHOP SIMONA TRENCHCOAT"},
+        measurements={"Size": "XS", "Description": "Good condition.",
+                      "Images 2D link": "https://cdn.orbitvu.co/share/AAA/1/still/view"},
+    )
+
+    briefs = []
+
+    def fake_ai(system, user, tool_name, input_schema, **kwargs):
+        if tool_name == "pick_colour":
+            return {"colour": "Beige", "reasoning": "stub"}
+        briefs.append(user)
+        props = input_schema["properties"]["item_specifics"]["properties"]
+        required = set(input_schema["properties"]["item_specifics"].get("required", []))
+        specifics = {}
+        for name, spec in props.items():
+            if name not in required:
+                continue
+            if spec.get("type") == "array":
+                specifics[name] = spec["items"]["enum"][:1]
+            elif "enum" in spec:
+                specifics[name] = spec["enum"][0]
+            else:
+                specifics[name] = "Cotton"
+        return {
+            "title": "FRANKIE SHOP Womens Simona Trenchcoat Short Coat Neutral XS RRP 295",
+            "condition_id": category.conditions[0][0],
+            "condition_description": "Good condition.",
+            "material_summary": "Cotton",
+            "item_specifics": specifics,
+        }
+
+    original = ai_client.call_structured
+    ai_client.call_structured = fake_ai
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            result = content_generator.generate_for_product(
+                product, category, template, d, force=True)
+    finally:
+        ai_client.call_structured = original
+
+    check("end-to-end: the title says Beige", "Beige" in result["title"], True)
+    check("end-to-end: and no longer says Neutral", "Neutral" in result["title"], False)
+    check("end-to-end: the specific agrees",
+          result["item_specifics"].get("C:Colour"), "Beige")
+    # And the model was told, so it should not have had to be corrected at
+    # all. Being told AND corrected is the belt-and-braces the size has.
+    check("end-to-end: the brief hands the model the resolved colour",
+          any("use EXACTLY this word in the title" in b and "Beige" in b for b in briefs), True)
+    check("end-to-end: and C:Colour was not asked of the model",
+          any('"C:Colour"' in b for b in briefs), False)
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

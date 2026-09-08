@@ -121,6 +121,7 @@ def check_row(
     _check_range_size(sku, product, row, issues)
     _check_misfiled_footwear(sku, product, row, issues)
     _check_category_gender(sku, product, row, issues)
+    _check_placeholder_values(sku, row, aspects, issues)
     _check_colour_family(sku, product, row, issues)
     _check_freetext_size(sku, product, row, category, template, issues)
     _check_collaboration_title(sku, row, issues)
@@ -374,6 +375,47 @@ def _check_category_gender(sku, product, row, issues):
             sku, "REVIEW",
             f"Gender says {_text(product.m('Gender'))} but it is listed in "
             f"{category_name!r}"))
+
+
+# The words the app writes into a field it is deliberately not filling.
+PLACEHOLDER_WORDS = {"not specified", "not applicable", "unspecified", "does not apply"}
+
+
+def _check_placeholder_values(sku, row, aspects, issues):
+    """A placeholder sitting in an aspect whose own list does not contain it.
+
+    08.09.26 is why this is here, and why it is a FIX rather than a note.
+    All 28 garments in the first clothing batch were refused with error
+    21919323: "Fabric weight must be greater than 0." C:Fabric Weight is
+    Optional, carries no value list, and eBay validates it as a number — so
+    "Not Specified" in it is an invalid value, and one invalid value in one
+    optional field on every row took the entire file down.
+
+    The templates do not record which aspects are numeric, so this cannot be
+    decided from the type. It does not need to be: a placeholder is only ever
+    safe where eBay itself offers those words, and anywhere else the field is
+    better empty. Cleared rather than blocked, because clearing an optional
+    field is always safe and holding 28 rows back over a field nobody wanted
+    filled would be its own kind of failure.
+
+    C:MPN is exempt: "Does Not Apply" is eBay's own documented value there
+    and 295 shoe listings carry it."""
+    for name, value in list(row.items()):
+        if not name.startswith("C:") or name == "C:MPN":
+            continue
+        text = _text(value)
+        if text.lower() not in PLACEHOLDER_WORDS:
+            continue
+        spec = aspects.get(name)
+        allowed = getattr(spec, "values", None) if spec else None
+        if allowed and text in allowed:
+            continue
+        row[name] = ""
+        issues.append(Issue(
+            sku, "FIX",
+            f"{name} said {text!r}, which is not one of eBay's values for it — cleared. "
+            f"eBay refuses the whole file over an invalid value in an optional field "
+            f"(error 21919323, 08.09.26)"))
 
 
 def _check_colour_family(sku, product, row, issues):

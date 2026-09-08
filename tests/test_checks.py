@@ -1330,6 +1330,65 @@ def test_a_colour_family_and_an_unrecognised_size_are_reported():
               for m in messages(run(good_row(**{"C:Size": "MM"}), size="8"), "NOTE")), False)
 
 
+def test_a_placeholder_is_only_written_where_ebay_offers_it():
+    """08.09.26. All 28 garments in the first clothing batch were refused
+    with error 21919323: "Fabric weight must be greater than 0. Enter up to
+    1 number after the decimal."
+
+    C:Fabric Weight is OPTIONAL, carries no value list, and eBay validates
+    it as a number. "Not Specified" in it is an invalid value, and one
+    invalid value in one field nobody wanted filled took down every listing
+    in the file. Not a required field, not a size, not a category — an
+    optional field the app was being polite in.
+
+    Cleared rather than blocked: clearing an optional field is always safe,
+    and holding 28 rows back over it would be its own kind of failure."""
+    numeric = {"C:Fabric Weight": AspectSpec("C:Fabric Weight", "OPTIONAL", None)}
+    row = good_row(**{"C:Fabric Weight": "Not Specified"})
+    issues = run(row, aspects=numeric, size="8")
+    check("the placeholder is cleared", row["C:Fabric Weight"], "")
+    check("and it is reported", any("Fabric Weight" in m for m in messages(issues, "FIX")), True)
+    check("but the row still ships", validation.blocking_reasons(issues), [])
+
+    # Where eBay's own list has the words, they stay. 295 shoe listings and
+    # the account's whole Optiseller history rely on this.
+    offered = {"C:Pattern": AspectSpec("C:Pattern", "OPTIONAL",
+                                       ["Floral", "Striped", "Not Specified"])}
+    kept = good_row(**{"C:Pattern": "Not Specified"})
+    check("an offered placeholder is left alone",
+          messages(run(kept, aspects=offered, size="8"), "FIX"), [])
+    check("and stays in the row", kept["C:Pattern"], "Not Specified")
+
+    # MPN is eBay's own documented exception and carries "Does Not Apply"
+    # on every one of the 295 live shoe listings.
+    mpn = good_row(**{"C:MPN": "Does Not Apply"})
+    check("MPN keeps Does Not Apply",
+          messages(run(mpn, aspects={"C:MPN": AspectSpec("C:MPN", "OPTIONAL", None)}, size="8"), "FIX"), [])
+    check("and it survives", mpn["C:MPN"], "Does Not Apply")
+
+    # And the generator must not write it in the first place. The check
+    # above is the second line of defence; this is the first, and both are
+    # here because the mutation that removes one leaves the other passing.
+    from src import content_generator, ebay_template as et
+    check("no placeholder for a free-text aspect",
+          content_generator._placeholder_for(et.AspectSpec("C:Fabric Weight", "OPTIONAL", None)),
+          None)
+    check("nor for a selection-only aspect that does not offer it",
+          content_generator._placeholder_for(
+              et.AspectSpec("C:Pattern", "OPTIONAL", ["Floral", "Striped"])),
+          None)
+    check("but yes where eBay's own list has the words",
+          content_generator._placeholder_for(
+              et.AspectSpec("C:Pattern", "OPTIONAL", ["Floral", "Not Specified"])),
+          "Not Specified")
+
+    # A real value is never touched.
+    real = good_row(**{"C:Fabric Weight": "300"})
+    check("a real value is left alone",
+          messages(run(real, aspects=numeric, size="8"), "FIX"), [])
+    check("and survives", real["C:Fabric Weight"], "300")
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

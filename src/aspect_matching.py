@@ -1070,6 +1070,46 @@ def enforce_title_gender(title: str, department, brand=None) -> str:
     return f"{word} {title}"
 
 
+# The internal colour families, as they turn up written in a title. The
+# model is handed the resolved colour and told to use it, but a prompt is
+# not a guarantee — 08.09.26, three of the first thirty garments went out
+# reading "Neutral" while the item specific said Beige.
+_TITLE_COLOUR_FAMILY_RE = re.compile(
+    r"\b(?:neutrals?|neutral-toned|undyed)\b", re.IGNORECASE)
+
+
+def enforce_title_colour(title: str, colour: str | None) -> str:
+    """Swaps an internal colour family word in the title for the colour the
+    listing actually carries.
+
+    Deliberately narrow. It rewrites the family words and nothing else: a
+    title saying "Black" on a black coat, or "Ecru" on a beige one, is left
+    exactly alone, because a shade name a copywriter chose is a better title
+    than a flattened one and only the family words are actively useless.
+    "Neutral" is not a colour anybody searches eBay for; "Ecru" at least is.
+
+    Metallic is deliberately NOT in the list. It is a real descriptive word
+    for a real finish — "Metallic Leather Sandal" is a good title — and the
+    resolved Gold or Silver almost always appears alongside it.
+
+    Nothing to swap in means nothing is swapped out: with no resolved colour
+    the title is returned untouched rather than losing a word."""
+    title = (title or "").strip()
+    colour = " ".join(str(colour or "").strip().split())
+    if not title or not colour:
+        return title
+    if not _TITLE_COLOUR_FAMILY_RE.search(title):
+        return title
+    # If the resolved colour is already in the title, the family word is a
+    # duplicate rather than a stand-in, so it comes out entirely.
+    if re.search(rf"\b{re.escape(colour)}\b", title, flags=re.IGNORECASE):
+        out = _TITLE_COLOUR_FAMILY_RE.sub("", title)
+    else:
+        out = _TITLE_COLOUR_FAMILY_RE.sub(colour, title, count=1)
+        out = _TITLE_COLOUR_FAMILY_RE.sub("", out)
+    return re.sub(r"\s{2,}", " ", out).strip()
+
+
 def trim_title(title: str, size_for_display: str | None = None, limit: int = 80) -> str:
     """Cuts an over-long title to eBay's limit without losing the parts that
     have to survive.

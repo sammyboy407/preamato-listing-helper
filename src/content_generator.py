@@ -92,7 +92,7 @@ def _sizing_sources() -> list:
         aspect_matching.match_size, aspect_matching.size_display,
         aspect_matching.match_colour, aspect_matching._marker_first,
         _resolve_colour, _primary_image, vision.colour_from_image,
-        vision._prefer_beige,
+        vision._prefer_beige, aspect_matching.enforce_title_colour,
         aspect_matching._size_format_variants,
         aspect_matching.size_display_for,
         aspect_matching.fuzzy_match, aspect_matching.parse_shoe_size,
@@ -209,13 +209,29 @@ MULTI_SELECT_ASPECTS = {"C:Occasion"}
 # Optiseller-era listings handled these (Character: "Not Applicable" on 161
 # listings, Chest Size / Waist Size: "Not Specified", etc.).
 #
-# Only ever written where eBay definitely accepts a value that isn't on the
-# aspect's own list (see ebay_template.AspectSpec.free_text): for a
-# SELECTION_ONLY aspect, "Not Specified" is an invalid value and would get
-# the whole listing rejected — the same class of failure as a missing
-# required field, which is exactly what this pipeline exists to avoid. A
-# blank and a "Not Specified" mean the same thing to eBay's search anyway,
-# so the placeholder is presentation, never worth risking a rejection for.
+# Only ever written where the aspect's OWN list contains it. Anywhere else
+# the field is left blank.
+#
+# It used to also be written into any free-text aspect, on the reasoning that
+# eBay accepts any string there. It does not. 08.09.26: all 28 garments in
+# the first clothing batch were refused with error 21919323, "Fabric weight
+# must be greater than 0. Enter up to 1 number after the decimal." C:Fabric
+# Weight is Optional, carries no value list, and is validated as a NUMBER, so
+# "Not Specified" is not a harmless placeholder in it — it is an invalid
+# value, and one invalid value in one optional field killed every listing in
+# the file.
+#
+# The templates do not record which aspects are numeric (eBay's Metadata API
+# returns aspectDataType; the fetch script does not keep it yet), so there is
+# no way to tell a numeric free-text aspect from a textual one. Rather than
+# guess, nothing is written into any of them. That costs nothing: a blank and
+# a "Not Specified" mean the same thing to eBay's search, which is why the
+# comment here already said the placeholder was "presentation, never worth
+# risking a rejection for". This is that sentence, finally applied to the one
+# case it was not.
+#
+# Sammy's original rule, 04.09.26, was "dont fill with random info just say
+# not specified". Still honoured wherever eBay offers the words.
 PLACEHOLDER_VALUE = "Not Specified"
 
 
@@ -226,7 +242,7 @@ def _placeholder_for(spec: ebay_template.AspectSpec) -> str | None:
         for candidate in (PLACEHOLDER_VALUE, "Not Applicable", "Unspecified", "Does Not Apply"):
             if candidate in spec.values:
                 return candidate
-    return PLACEHOLDER_VALUE if spec.free_text else None
+    return None
 
 
 def _set_placeholder(specifics: dict, name: str, spec: ebay_template.AspectSpec) -> None:
@@ -387,22 +403,33 @@ def _resolve_size(name: str, product: Product, spec: ebay_template.AspectSpec) -
         # a blank is harmless, a wrong size is not.
         return None
     matched = aspect_matching.match_size(raw, spec.values)
-    if matched or name != "C:Size":
+    if matched:
+        return matched
+    if spec.values:
+        # eBay validates C:Size against its list on clothing. 08.09.26,
+        # error 21920468 on eight of twenty-eight garments: "3" is not a
+        # valid value for Size, and neither were 38, 40, 48, 50 or MM.
+        #
+        # Those raw numbers used to be written through untouched, on the
+        # evidence of the account's own Optiseller-era uploads, which put 46,
+        # 39 and "33/32" straight into C:Size and were accepted. That is no
+        # longer true for these categories, so passing a size through is not
+        # a harmless best effort any more — it is a listing that gets
+        # refused, and worse, a whole file that gets refused with it.
+        #
+        # So it is refused here instead, by name, before the file is
+        # written. The size is a real one — a Moncler 3 is a size, an
+        # Alexander McQueen 38 is a size — it just needs its scale said out
+        # loud: IT 38, FR 38, EU 48. eBay's own clothing lists carry exactly
+        # those forms, and the team already writes markers on shoes.
+        return None
+    if name != "C:Size":
         # Other size-family aspects (Waist Size, Chest Size, Ring Size, Cup
         # Size...) measure something the plain Size column doesn't, so an
         # unmatched raw value is left blank rather than passed through.
         return matched
-    # No match against eBay's list — write the measured size through as-is.
-    # Sammy's call, 04.09.26: "these just need to be pushed into the SIZE
-    # column." Backed by the real Optiseller output file this account used
-    # to upload with (PreamatoFashionP45OutputFinalAug2026...xlsx): it
-    # writes raw sizes like 46, 39, 31, "33/32", "XXL", "4T" straight into
-    # C:Size for categories whose eBay list only "recommends" IT 46 / 2XL /
-    # etc., and eBay accepted every one — so Size on clothing categories is
-    # a free-text aspect with suggested values, not a closed list. The list
-    # is still matched against first so casing/aliases get normalised where
-    # they can be ("xl" -> "XL", "os" -> "One Size"); this is only the
-    # fallback for a size on a scale eBay's suggestions don't include.
+    # Only where eBay offers no list at all to check against. Sammy's call,
+    # 04.09.26: "these just need to be pushed into the SIZE column."
     raw = str(raw).strip() if raw is not None else ""
     return raw or None
 
@@ -489,7 +516,8 @@ def _condition_rubric(category: ebay_template.CategorySpec) -> str:
     )
 
 
-def _product_brief(product: Product, size_for_title: str | None = None) -> str:
+def _product_brief(product: Product, size_for_title: str | None = None,
+                   colour_for_title: str | None = None) -> str:
     m, meas = product.master, product.measurements
     lines = [
         f"SKU: {product.sku}",
@@ -505,8 +533,19 @@ def _product_brief(product: Product, size_for_title: str | None = None) -> str:
         # Size, by contrast, stays Measurements-only — see _resolve_size —
         # since size is the one field actually verified against the
         # physical item at that stage, not just carried over.
-        f"Colour (raw, may not match eBay's exact wording): "
+        f"Colour (raw, internal wording — may be a family such as Neutrals or "
+        f"Metallic rather than a colour): "
         f"{m.get('Colour') or meas.get('Colour') or '(not recorded)'}",
+        # The colour the listing will actually carry, already resolved in
+        # Python — from the recorded colour where that is an eBay colour, and
+        # otherwise read off the item's own photograph (see vision.py).
+        # Handed over for the same reason the size is: on 08.09.26 three
+        # titles went out reading "Neutral" while the item specific said
+        # Beige. Nobody searches eBay for neutral.
+        "Colour — use EXACTLY this word in the title, do not substitute a "
+        "shade name: " + (colour_for_title or
+                          "(not resolved — describe the colour from the internal "
+                          "title if you can, otherwise leave it out)"),
         # The size the listing will actually carry, already resolved and
         # converted in Python (see generate_for_product). The AI must use
         # this string as-is in the title — on 04.09.26 it was converting
@@ -736,9 +775,30 @@ def generate_for_product(
     raw_size = product.measurements.get("Size")
     size_for_title = aspect_matching.size_display_for(product, resolved)
 
-    # 2. The AI call, for the fields that genuinely need judgment.
+    # Colour, resolved before the AI is asked anything, for exactly the
+    # reason the size is: the model cannot write a title that disagrees with
+    # a value it was handed. On 08.09.26 three of the first thirty garments
+    # went out reading "Neutral" in the title while the item specific said
+    # Beige, because the colour was being settled after the title was
+    # written. Nobody searches eBay for neutral.
+    #
+    # It also stops being a question worth asking. The answer comes from the
+    # recorded colour where that is one of eBay's, and otherwise from the
+    # item's own photograph — both better sources than a guess made from the
+    # internal title, which is all the model ever had.
     enum_specs, hybrid_specs, multi_specs, skipped = classify_aspects(category.category_id, template)
-    product_text = _product_brief(product, size_for_title)
+    colour_specs = {n: sp for n, sp in list(enum_specs.items()) + list(hybrid_specs.items())
+                    if _is_colour_aspect(n)}
+    for name, spec in colour_specs.items():
+        value = _resolve_colour(product, spec, None)
+        if value:
+            resolved[name] = value
+        enum_specs.pop(name, None)
+        hybrid_specs.pop(name, None)
+    colour_for_title = resolved.get("C:Colour")
+
+    # 2. The AI call, for the fields that genuinely need judgment.
+    product_text = _product_brief(product, size_for_title, colour_for_title)
     schema, system = _build_schema_and_system(category, enum_specs, hybrid_specs, multi_specs, product_text)
 
     result = ai_client.call_structured(
@@ -771,6 +831,12 @@ def generate_for_product(
     # C:UK Shoe Size said 4.5), so it's enforced in Python here, same as the
     # brand casing above.
     result["title"] = aspect_matching.enforce_title_size(result.get("title", ""), size_for_title)
+
+    # And the colour word, for the same reason and with the same distrust of
+    # a prompt instruction. Only the internal family words are rewritten —
+    # a title that says "Black" on a black coat is left exactly alone.
+    result["title"] = aspect_matching.enforce_title_colour(
+        result.get("title", ""), colour_for_title)
 
     # Mens / Womens straight after the brand, for eBay search. Sammy,
     # 06.09.26. Read from the Master File's Gender, the same column
@@ -1011,8 +1077,24 @@ def _size_failure_detail(name: str, product: Product, spec: ebay_template.Aspect
             f"the Measurements file size {raw_size!r} isn't a recognisable shoe size "
             f"(expected e.g. '45', 'EU 45' or 'UK 11')."
         )
-    sample_values = ", ".join(spec.values[:12]) if spec.values else "(no closed list)"
-    more = f", +{len(spec.values) - 12} more" if spec.values and len(spec.values) > 12 else ""
+    # Clothing. eBay's list carries the scale in front — IT 38, EU 48, FR 40,
+    # US 2 — so an unmarked number is almost always a real size with its
+    # scale left off, and saying which scales this category offers is the
+    # actionable half of the message.
+    values = spec.values or []
+    marked = sorted({v.split(" ", 1)[0] for v in values
+                     if " " in v and v.split(" ", 1)[0] in aspect_matching._SIZE_MARKERS})
+    if marked and re.fullmatch(r"\d+(\.\d+)?", str(raw_size).strip()):
+        return (
+            f"the Measurements file size {raw_size!r} is a bare number, and eBay will not "
+            f"accept it for this category — it needs its scale saying out loud. This "
+            f"category takes {', '.join(marked)} sizes, so record it as "
+            f"{marked[0]} {str(raw_size).strip()} (or whichever scale the label uses) and "
+            f"re-run. It will not be guessed: an Italian 38 and a French 38 are different "
+            f"garments."
+        )
+    sample_values = ", ".join(values[:12]) if values else "(no closed list)"
+    more = f", +{len(values) - 12} more" if len(values) > 12 else ""
     return (
         f"the Measurements file has a size for this SKU ({raw_size!r}), but it "
         f"couldn't be matched to a value eBay accepts for this category's {name!r} "
