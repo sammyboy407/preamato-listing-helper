@@ -50,7 +50,7 @@ import re
 import threading
 from pathlib import Path
 
-from . import aspect_matching, ai_client, ebay_template
+from . import aspect_matching, ai_client, ebay_template, vision
 from .data_loader import Product, split_image_urls
 
 _CACHE_LOCK = threading.Lock()
@@ -91,6 +91,8 @@ def _sizing_sources() -> list:
         aspect_matching.match_shoe_size_uk, aspect_matching.match_shoe_size_eu,
         aspect_matching.match_size, aspect_matching.size_display,
         aspect_matching.match_colour, aspect_matching._marker_first,
+        _resolve_colour, _primary_image, vision.colour_from_image,
+        vision._prefer_beige,
         aspect_matching._size_format_variants,
         aspect_matching.size_display_for,
         aspect_matching.fuzzy_match, aspect_matching.parse_shoe_size,
@@ -125,6 +127,10 @@ def _sizing_fingerprint() -> str:
     parts.append(repr(sorted(aspect_matching.SIZE_ALIASES.items())))
     parts.append(repr(sorted(aspect_matching.COLOUR_FAMILY_ALIASES.items())))
     parts.append(repr(aspect_matching._SIZE_MARKERS))
+    # The vision prompt decides what colour comes back, so an edit to it has
+    # to invalidate every cached listing exactly as a sizing change does.
+    parts.append(vision.SYSTEM)
+    parts.append(repr(sorted(vision.NEUTRALS_ALWAYS.items())))
     # The compiled patterns and word lists the title functions read. These
     # live at module level, so inspect.getsource on the functions above does
     # not see them: without this, adding the singular "Men" to
@@ -293,6 +299,51 @@ def _resolve_deterministic(name: str, product: Product, spec: ebay_template.Aspe
             return aspect_matching.fuzzy_match(raw, spec.values, cutoff=0.5)
         return str(raw).strip()
     return None
+
+
+def _primary_image(product: Product) -> str | None:
+    """The first photograph of the item, which is the front-on studio shot."""
+    urls = split_image_urls(product.measurements.get("Images 2D link"))
+    return urls[0] if urls else None
+
+
+def _resolve_colour(product: Product, spec, guess) -> str:
+    """The item's eBay colour, in the order the sources deserve to be trusted.
+
+    1. The recorded colour, when it IS one of eBay's colours. 1,300 of 1,752
+       products say Black, White, Brown, Blue. Free, exact, and unchanged from
+       the behaviour that put 295 shoes online correctly.
+    2. The photograph. Only reached when the recorded colour is not one of
+       eBay's values, which is the colour-family case: Neutrals (118),
+       Metallic (133), Burgundy (28). The picture is the only place the real
+       answer exists. See vision.py.
+    3. The model's own text guess, if it happens to resolve.
+    4. The colour-family map — Neutrals to Beige, Metallic to Silver — as the
+       floor, so a failed photograph never leaves the colour worse than fix 28
+       already had it.
+
+    Sammy, 08.09.26: "how do we get the correct colour - can you pull it from
+    the imagery?" """
+    values = spec.values or []
+    raw_colour = product.master.get("Colour") or product.measurements.get("Colour")
+
+    exact = aspect_matching.fuzzy_match(raw_colour, values, cutoff=0.9)
+    if exact:
+        return exact
+
+    seen = vision.colour_from_image(
+        _primary_image(product), values,
+        recorded_colour=raw_colour,
+        title=product.master.get("Clean Title Description"),
+    )
+    if seen:
+        return seen
+
+    matched = aspect_matching.fuzzy_match(guess, values, cutoff=0.5)
+    if matched:
+        return matched
+
+    return aspect_matching.match_colour(raw_colour, values) or (guess or "")
 
 
 def _resolve_measurement(name: str, product: Product) -> str | None:
@@ -781,21 +832,12 @@ def generate_for_product(
     # the AI's free-text guess must still resolve to something eBay accepts.
     for name, spec in hybrid_specs.items():
         guess = specifics.get(name)
+        if _is_colour_aspect(name):
+            specifics[name] = _resolve_colour(product, spec, guess)
+            continue
         matched = aspect_matching.fuzzy_match(guess, spec.values, cutoff=0.5)
         if matched:
             specifics[name] = matched
-        elif _is_colour_aspect(name):
-            # Last resort for a colour field: fall back to the item's own
-            # raw colour text rather than an unvalidated AI guess. Master
-            # File first — Colour is entered at intake and carried onto the
-            # Measurements file at photography, so Master is the source of
-            # truth here (unlike Size — see _resolve_size).
-            raw_colour = product.master.get("Colour") or product.measurements.get("Colour")
-            # match_colour, not a bare fuzzy_match: this account records
-            # colour families ("Neutrals", "Metallic", "Burgundy") that
-            # eBay has no entry for, and the closest string to "Neutrals"
-            # in eBay's list is "Purple". See COLOUR_FAMILY_ALIASES.
-            specifics[name] = aspect_matching.match_colour(raw_colour, spec.values) or (guess or "")
         # else: leave the AI's free-text guess as-is (best effort; not in the
         # sampled list shown to it doesn't necessarily mean it's wrong).
 

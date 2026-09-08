@@ -1264,6 +1264,24 @@ def test_the_doubled_gender_word_cannot_be_re_served_from_cache():
         aspect_matching.COLOUR_FAMILY_ALIASES.clear()
         aspect_matching.COLOUR_FAMILY_ALIASES.update(colours_original)
 
+    from src import vision as _vision
+    neutrals_original = dict(_vision.NEUTRALS_ALWAYS)
+    try:
+        _vision.NEUTRALS_ALWAYS["Zzz"] = "Beige"
+        check("changing the beige rule changes the cache fingerprint",
+              content_generator._sizing_fingerprint() != baseline, True)
+    finally:
+        _vision.NEUTRALS_ALWAYS.clear()
+        _vision.NEUTRALS_ALWAYS.update(neutrals_original)
+
+    prompt_original = _vision.SYSTEM
+    try:
+        _vision.SYSTEM = prompt_original + "\nAnd one more thing."
+        check("changing the photo prompt changes the cache fingerprint",
+              content_generator._sizing_fingerprint() != baseline, True)
+    finally:
+        _vision.SYSTEM = prompt_original
+
     markers_original = aspect_matching._SIZE_MARKERS
     try:
         aspect_matching._SIZE_MARKERS = markers_original + ("ZZ",)
@@ -1423,6 +1441,213 @@ def test_a_colour_family_is_never_matched_to_a_random_colour():
     colour = result["item_specifics"].get("C:Colour")
     check("end-to-end: a Neutrals coat is not listed as Purple", colour != "Purple", True)
     check("end-to-end: it is listed as Beige", colour, "Beige")
+
+
+def test_the_colour_is_read_off_the_photograph():
+    """Sammy, 08.09.26: "how do we get the correct colour - can you pull it
+    from the imagery?"
+
+    Colour is REQUIRED on every clothing category and was not on shoes, so
+    the first clothing batch is the first time it has mattered. The Master
+    File records families rather than colours — Neutrals on 118 products,
+    Metallic on 133 — and eBay has an entry for neither. Every item is
+    photographed on a white sweep before it is listed, so the answer is in
+    the picture and nowhere else in the data.
+
+    Four things have to hold, and all four are about restraint rather than
+    cleverness: it must not run when the recorded colour is already right, it
+    must only ever answer with one of eBay's own values, it must be allowed
+    to say it cannot tell, and no failure of it may leave a colour worse than
+    it was without it."""
+    import tempfile
+    from src import ai_client, content_generator, ebay_template, vision
+    from src.data_loader import Product
+
+    templates_dir = Path(__file__).resolve().parent.parent / "data" / "templates"
+    womens = templates_dir / "womenswear_clothing.json"
+    if not womens.exists():
+        print("  (skipped vision colour check: data/templates not present)")
+        return
+
+    template = ebay_template.load_template(womens)
+    category = template.category_by_id("63862")  # Coats, Jackets & Waistcoats
+    photos = ("https://cdn.orbitvu.co/share/AAA/1/still/view\n"
+              "https://cdn.orbitvu.co/share/AAA/2/still/view")
+
+    def make(colour, images=photos):
+        return Product(
+            sku="QTN02-001-543",
+            master={"Brand": "FRANKIE SHOP", "Gender": "WOMEN", "Colour": colour,
+                    "Category": "Ready to Wear", "SubCat2": "Coats", "Rounded RRP": 295,
+                    "Clean Title Description": "FRANKIE SHOP WOOL COAT"},
+            measurements={"Size": "XS", "Description": "Good condition.",
+                          "Images 2D link": images},
+        )
+
+    calls = []
+
+    def stub(answer):
+        def fake_ai(system, user, tool_name, input_schema, **kwargs):
+            calls.append((tool_name, kwargs.get("image_url")))
+            if tool_name == "pick_colour":
+                return {"colour": answer, "reasoning": "stub"}
+            props = input_schema["properties"]["item_specifics"]["properties"]
+            required = set(input_schema["properties"]["item_specifics"].get("required", []))
+            specifics = {}
+            for name, spec in props.items():
+                if name not in required:
+                    continue
+                if spec.get("type") == "array":
+                    specifics[name] = spec["items"]["enum"][:1]
+                elif "enum" in spec:
+                    specifics[name] = spec["enum"][0]
+                else:
+                    specifics[name] = "Cotton"
+            specifics["C:Colour"] = "Oatmeal Sand Taupe"   # matches nothing in eBay's list
+            return {
+                "title": "FRANKIE SHOP Womens Wool Coat XS RRP 295",
+                "condition_id": category.conditions[0][0],
+                "condition_description": "Good condition.",
+                "material_summary": "Wool",
+                "item_specifics": specifics,
+            }
+        return fake_ai
+
+    def run_one(product, answer):
+        calls.clear()
+        original = ai_client.call_structured
+        ai_client.call_structured = stub(answer)
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                result = content_generator.generate_for_product(
+                    product, category, template, d, force=True)
+        finally:
+            ai_client.call_structured = original
+        return result["item_specifics"].get("C:Colour")
+
+    # The photograph answers, and it is not Purple.
+    check("a Neutrals coat is read off its photo", run_one(make("Neutrals"), "Beige"), "Beige")
+    check("the photo was actually sent",
+          [url for tool, url in calls if tool == "pick_colour"],
+          ["https://cdn.orbitvu.co/share/AAA/1/still/view"])
+    check("and it is the FIRST photo, the front-on shot",
+          all("/2/still" not in (url or "") for _t, url in calls), True)
+
+    # A recorded colour that IS an eBay colour must not spend a call at all.
+    # 1,300 of 1,752 products are in this case; paying for a vision call on
+    # every one of them would be a cost with no answer attached.
+    check("a real colour still lists as itself", run_one(make("Black"), "Red"), "Black")
+    check("and no photo call was made", [t for t, _u in calls if t == "pick_colour"], [])
+
+    # It is allowed to say it cannot tell, and then the family map is the
+    # floor — never worse than fix 28 on its own.
+    check("NONE falls back to the family map", run_one(make("Neutrals"), "NONE"), "Beige")
+    check("Metallic falls back to Silver", run_one(make("Metallic"), "NONE"), "Silver")
+
+    # And it can never answer with something eBay does not offer.
+    check("an off-list answer is refused", run_one(make("Neutrals"), "Oatmeal"), "Beige")
+
+    # Sammy, 08.09.26: "i would say always go with beige". Beige and ivory
+    # are a shade apart to a buyer, beige is the commoner search term, and a
+    # consistent answer across a catalogue beats a coin flip taken again on
+    # every item. Enforced in code as well as in the prompt, so a later edit
+    # to the wording cannot quietly bring ivory back.
+    check("ivory becomes beige", run_one(make("Neutrals"), "Ivory"), "Beige")
+    check("and white is still white", run_one(make("Neutrals"), "White"), "White")
+    check("and black is still black", run_one(make("Neutrals"), "Black"), "Black")
+    check("and brown is still brown", run_one(make("Neutrals"), "Brown"), "Brown")
+
+    # The prompt has to carry the rule too, not just the guard behind it.
+    check("the prompt names the neutral band",
+          "cream, ecru, oatmeal, sand, stone, taupe" in vision.SYSTEM, True)
+    check("the prompt tells it to answer Beige", "answer Beige" in vision.SYSTEM, True)
+    check("and not to answer Ivory", "Do not answer Ivory" in vision.SYSTEM, True)
+
+    # If a category somehow has no Beige, ivory stands rather than vanishing.
+    check("no Beige on the list leaves ivory alone",
+          vision._prefer_beige("Ivory", ["Ivory", "White"]), "Ivory")
+
+    # An API failure must not take the batch with it.
+    def exploding(system, user, tool_name, input_schema, **kwargs):
+        if tool_name == "pick_colour":
+            raise RuntimeError("CDN timeout")
+        return stub("NONE")(system, user, tool_name, input_schema, **kwargs)
+
+    original = ai_client.call_structured
+    ai_client.call_structured = exploding
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            result = content_generator.generate_for_product(
+                make("Neutrals"), category, template, d, force=True)
+    finally:
+        ai_client.call_structured = original
+    check("a failed photo call still ships a colour",
+          result["item_specifics"].get("C:Colour"), "Beige")
+
+    # No photo at all, same floor.
+    check("no photo, no problem", run_one(make("Neutrals", images=""), "Beige"), "Beige")
+
+    # The unit itself: only eBay's own values, ever.
+    ebay = ["Beige", "Black", "Ivory", "Multicoloured", "Silver"]
+    original = ai_client.call_structured
+    ai_client.call_structured = lambda **k: {"colour": "Taupe", "reasoning": ""}
+    try:
+        check("colour_from_image refuses an off-list value",
+              vision.colour_from_image("http://x/1", ebay), None)
+    finally:
+        ai_client.call_structured = original
+    check("and refuses to guess with no photo",
+          vision.colour_from_image(None, ebay), None)
+
+    # And the photo has to reach the actual request, not just the function
+    # signature. Asserted against what the SDK is handed, because "the
+    # argument was passed and then quietly dropped one layer down" is
+    # precisely the shape of bug this codebase keeps producing.
+    sent = {}
+
+    class _Block:
+        type = "tool_use"
+        name = "pick_colour"
+        input = {"colour": "Beige", "reasoning": "stub"}
+
+    class _Resp:
+        content = [_Block()]
+
+    class _Messages:
+        def create(self, **kwargs):
+            sent.update(kwargs)
+            return _Resp()
+
+    class _Client:
+        messages = _Messages()
+
+    original_client = ai_client.get_client
+    ai_client.get_client = lambda: _Client()
+    try:
+        got = vision.colour_from_image("http://x/front.jpg", ebay, recorded_colour="Neutrals")
+    finally:
+        ai_client.get_client = original_client
+
+    check("the colour comes back", got, "Beige")
+    content = sent["messages"][0]["content"]
+    check("the request carries content blocks, not bare text", isinstance(content, list), True)
+    images = [b for b in content if b.get("type") == "image"]
+    check("exactly one image is attached", len(images), 1)
+    check("and it is the photo we asked for",
+          images[0]["source"]["url"], "http://x/front.jpg")
+    check("the question is still there",
+          any(b.get("type") == "text" for b in content), True)
+
+    # No image, no image block — the 295 shoe listings' text-only path is
+    # untouched.
+    sent.clear()
+    ai_client.get_client = lambda: _Client()
+    try:
+        ai_client.call_structured(system="s", user="u", tool_name="pick_colour",
+                                  input_schema={"type": "object"})
+    finally:
+        ai_client.get_client = original_client
+    check("a text-only call sends plain text", sent["messages"][0]["content"], "u")
 
 
 def main():

@@ -108,14 +108,30 @@ def call_structured(
     input_schema: dict,
     max_retries: int = 3,
     model: str = config.MODEL,
+    image_url: str | None = None,
 ) -> dict:
-    """Calls Claude with a single forced tool call and returns its input dict."""
+    """Calls Claude with a single forced tool call and returns its input dict.
+
+    image_url attaches one photograph to the question. Passed as a URL rather
+    than downloaded and base64'd here on purpose: the image is fetched by
+    Anthropic, not by this app, so a Streamlit Cloud container that cannot
+    reach the Orbitvu CDN still works, and a 3MB studio still never travels
+    through this process's memory. The URLs are already public — eBay
+    ingests these exact links as listing photos."""
     client = get_client()
     tool = {
         "name": tool_name,
         "description": f"Submit the {tool_name} result.",
         "input_schema": input_schema,
     }
+
+    if image_url:
+        content = [
+            {"type": "image", "source": {"type": "url", "url": image_url}},
+            {"type": "text", "text": user},
+        ]
+    else:
+        content = user
 
     last_err = None
     for attempt in range(max_retries):
@@ -124,7 +140,7 @@ def call_structured(
                 model=model,
                 max_tokens=4096,
                 system=system,
-                messages=[{"role": "user", "content": user}],
+                messages=[{"role": "user", "content": content}],
                 tools=[tool],
                 tool_choice={"type": "tool", "name": tool_name},
             )
