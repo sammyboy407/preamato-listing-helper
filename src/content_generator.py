@@ -90,6 +90,8 @@ def _sizing_sources() -> list:
         aspect_matching.scrub_internal_references, _inspection_flag,
         aspect_matching.match_shoe_size_uk, aspect_matching.match_shoe_size_eu,
         aspect_matching.match_size, aspect_matching.size_display,
+        aspect_matching.match_colour, aspect_matching._marker_first,
+        aspect_matching._size_format_variants,
         aspect_matching.size_display_for,
         aspect_matching.fuzzy_match, aspect_matching.parse_shoe_size,
         aspect_matching.parse_shoe_size_range, aspect_matching._resolve_range_end,
@@ -121,6 +123,8 @@ def _sizing_fingerprint() -> str:
     parts.append(repr(aspect_matching.BARE_NUMBER_SHOE_SYSTEM))
     parts.append(repr(sorted(aspect_matching.US_SIZED_BRANDS)))
     parts.append(repr(sorted(aspect_matching.SIZE_ALIASES.items())))
+    parts.append(repr(sorted(aspect_matching.COLOUR_FAMILY_ALIASES.items())))
+    parts.append(repr(aspect_matching._SIZE_MARKERS))
     # The compiled patterns and word lists the title functions read. These
     # live at module level, so inspect.getsource on the functions above does
     # not see them: without this, adding the singular "Men" to
@@ -787,7 +791,11 @@ def generate_for_product(
             # Measurements file at photography, so Master is the source of
             # truth here (unlike Size — see _resolve_size).
             raw_colour = product.master.get("Colour") or product.measurements.get("Colour")
-            specifics[name] = aspect_matching.fuzzy_match(raw_colour, spec.values, cutoff=0.4) or (guess or "")
+            # match_colour, not a bare fuzzy_match: this account records
+            # colour families ("Neutrals", "Metallic", "Burgundy") that
+            # eBay has no entry for, and the closest string to "Neutrals"
+            # in eBay's list is "Purple". See COLOUR_FAMILY_ALIASES.
+            specifics[name] = aspect_matching.match_colour(raw_colour, spec.values) or (guess or "")
         # else: leave the AI's free-text guess as-is (best effort; not in the
         # sampled list shown to it doesn't necessarily mean it's wrong).
 

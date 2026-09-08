@@ -121,6 +121,8 @@ def check_row(
     _check_range_size(sku, product, row, issues)
     _check_misfiled_footwear(sku, product, row, issues)
     _check_category_gender(sku, product, row, issues)
+    _check_colour_family(sku, product, row, issues)
+    _check_freetext_size(sku, product, row, category, template, issues)
     _check_collaboration_title(sku, row, issues)
     _check_internal_references(sku, row, issues)
     _check_length_contradictions(sku, row, issues)
@@ -372,6 +374,53 @@ def _check_category_gender(sku, product, row, issues):
             sku, "REVIEW",
             f"Gender says {_text(product.m('Gender'))} but it is listed in "
             f"{category_name!r}"))
+
+
+def _check_colour_family(sku, product, row, issues):
+    """A listing whose colour came from a colour family rather than a colour.
+
+    "Neutrals" (118 products) and "Metallic" (133) are families, not colours,
+    and eBay's list has neither. The model answers the colour first from the
+    item's own title, so most of these never touch the fallback; when one
+    does, it lands on Beige or Silver, which is right often enough to ship
+    and wrong often enough to name. Reported, never blocked."""
+    from . import aspect_matching
+    raw = _text(product.master.get("Colour")) or _text(product.measurements.get("Colour"))
+    if raw.lower() not in aspect_matching.COLOUR_FAMILY_ALIASES:
+        return
+    listed = _text(row.get("C:Colour"))
+    if not listed:
+        return
+    issues.append(Issue(
+        sku, "NOTE",
+        f"{sku}: recorded as {raw!r}, listed as {listed!r}",
+        group="Colour taken from a colour family, worth a glance"))
+
+
+def _check_freetext_size(sku, product, row, category, template, issues):
+    """A size that is not one of eBay's own values for the category.
+
+    Sizes on clothing are free text — the account's Optiseller history put
+    46, 39, "33/32" and "4T" straight into C:Size and eBay took all of them,
+    which is why an unmatched size still ships. But a size eBay does not
+    recognise does not appear in a size-filtered search, which is how a
+    buyer actually shops, and it is also where a typo hides: "MM" on a
+    Canada Goose coat, 08.09.26, which is an M.
+
+    So every one is named. Not blocked: a real Moncler 3 is a real size."""
+    listed = _text(row.get("C:Size"))
+    if not listed:
+        return
+    spec = template.aspects.get(str(category.category_id), {}).get("C:Size")
+    values = getattr(spec, "values", None) if spec else None
+    if not values or listed in values:
+        return
+    issues.append(Issue(
+        sku, "NOTE",
+        f"{sku}: size {listed!r} is not one of eBay's values for "
+        f"{_text(row.get('Category name'))}, so it ships as typed and will not "
+        f"show in a size-filtered search",
+        group="Sizes eBay does not recognise"))
 
 
 def _check_range_size(sku, product, row, issues):

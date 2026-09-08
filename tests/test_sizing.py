@@ -1255,6 +1255,23 @@ def test_the_doubled_gender_word_cannot_be_re_served_from_cache():
         finally:
             setattr(aspect_matching, name, original)
 
+    colours_original = dict(aspect_matching.COLOUR_FAMILY_ALIASES)
+    try:
+        aspect_matching.COLOUR_FAMILY_ALIASES["zzz"] = "Black"
+        check("changing the colour family map changes the cache fingerprint",
+              content_generator._sizing_fingerprint() != baseline, True)
+    finally:
+        aspect_matching.COLOUR_FAMILY_ALIASES.clear()
+        aspect_matching.COLOUR_FAMILY_ALIASES.update(colours_original)
+
+    markers_original = aspect_matching._SIZE_MARKERS
+    try:
+        aspect_matching._SIZE_MARKERS = markers_original + ("ZZ",)
+        check("changing the size marker list changes the cache fingerprint",
+              content_generator._sizing_fingerprint() != baseline, True)
+    finally:
+        aspect_matching._SIZE_MARKERS = markers_original
+
     words_original = dict(aspect_matching.TITLE_GENDER_WORDS)
     try:
         aspect_matching.TITLE_GENDER_WORDS["ZZZ"] = "Zzz"
@@ -1275,6 +1292,137 @@ def test_the_doubled_gender_word_cannot_be_re_served_from_cache():
 
     check("fingerprint is stable when nothing changed",
           content_generator._sizing_fingerprint(), baseline)
+
+
+def test_a_clothing_size_marker_reaches_ebays_own_value():
+    """Sammy briefed the team on 07.09.26 to put EU, UK or US in front of
+    every numerical size. The first clothing file back, 08.09.26, has the
+    marker behind it instead: "50 IT" on a Rick Owens coat, "34 IT" on the
+    jeans.
+
+    That matters more on clothing than it looks. eBay's clothing Size lists
+    carry the marker in FRONT — IT 50, EU 40, US 2, FR 38 — so the same size
+    written the other way round matches nothing and ships as free text,
+    which keeps the listing out of every size-filtered search a buyer runs.
+    Moving the marker turns it into one of eBay's own values."""
+    coats = ["2XS", "XS", "S", "M", "L", "XL", "48", "50", "52",
+             "IT 48", "IT 50", "IT 52", "EU 48", "EU 50", "FR 50", "One Size"]
+    check("a trailing marker moves to the front", am.match_size("50 IT", coats), "IT 50")
+    check("and a joined one", am.match_size("IT50", coats), "IT 50")
+    check("lower case too", am.match_size("50 it", coats), "IT 50")
+    check("EU as well", am.match_size("48 EU", coats), "EU 48")
+
+    # eBay's marked form wins over the bare number when it exists, because
+    # "IT 50" and a UK 50 are not the same garment.
+    check("the marked form is preferred", am.match_size("50 IT", coats), "IT 50")
+
+    # And where eBay offers no marked form, the bare number is better than
+    # shipping the raw string: men's jeans offer waist inches 24-40 and IT
+    # 42-60, so a Rick Owens "34 IT" has no IT 34 to match.
+    jeans = ["S", "M", "L", "30", "32", "34", "36", "IT 42", "IT 44", "IT 46"]
+    check("no marked form falls back to the number", am.match_size("34 IT", jeans), "34")
+
+    # Everything that already worked still works.
+    check("a leading marker still strips", am.match_size("UK8", ["6", "8", "10"]), "8")
+    check("a leading marker with a space", am.match_size("UK 8", ["6", "8", "10"]), "8")
+    check("a plain letter size", am.match_size("M", coats), "M")
+    check("a zero-padded number", am.match_size("03", ["3", "5", "8"]), "3")
+    check("one size", am.match_size("os", coats), "One Size")
+
+    # And a size on a scale nobody offers is still refused here, so it can
+    # fall through to the raw value rather than being bent into a wrong one.
+    # A Moncler 3 is a real size; it is not a UK 3.
+    check("an unknown scale is not forced", am.match_size("3", coats), None)
+    check("nor is a typo", am.match_size("MM", coats), None)
+    # The marker must not invent a size that was never written.
+    check("a bare marker matches nothing", am.match_size("IT", coats), None)
+
+
+def test_a_colour_family_is_never_matched_to_a_random_colour():
+    """This account records colour families, not colours: "Neutrals" on 118
+    products and "Metallic" on 133. eBay's Colour list has neither.
+
+    Left to a fuzzy match, 08.09.26, "Neutrals" scored closest to "Purple"
+    and "Metallic" to "Yellow". A beige coat listed as purple is worse than
+    no colour at all, and it would have gone out on five of the thirty
+    garments in the first clothing batch."""
+    ebay = ["Beige", "Black", "Blue", "Brown", "Clear", "Gold", "Green", "Grey",
+            "Ivory", "Multicoloured", "Orange", "Pink", "Purple", "Red", "Silver",
+            "White", "Yellow"]
+
+    check("Neutrals is beige, not purple", am.match_colour("Neutrals", ebay), "Beige")
+    check("Metallic is silver, not yellow", am.match_colour("Metallic", ebay), "Silver")
+    check("Burgundy is a red, not a brown", am.match_colour("Burgundy", ebay), "Red")
+    check("and case does not matter", am.match_colour("  neutrals ", ebay), "Beige")
+
+    # Every real colour in the Master File still resolves to itself. This is
+    # the half that matters: an alias map that broke the 1,300 products whose
+    # colour is already a colour would be a bad trade.
+    for colour in ["Black", "White", "Brown", "Multicoloured", "Blue", "Green",
+                   "Pink", "Red", "Grey", "Yellow", "Purple", "Orange"]:
+        check(f"{colour} is still {colour}", am.match_colour(colour, ebay), colour)
+
+    check("nothing in, nothing out", am.match_colour("", ebay), None)
+    check("no list, no answer", am.match_colour("Black", []), None)
+
+    # And it has to actually be wired into the generator, not just exist.
+    # The fallback only fires when the model's own colour guess matches
+    # nothing, so the stub answers with a word eBay has never heard of.
+    import tempfile
+    from src import ai_client, content_generator, ebay_template
+    from src.data_loader import Product
+
+    templates_dir = Path(__file__).resolve().parent.parent / "data" / "templates"
+    womens = templates_dir / "womenswear_clothing.json"
+    if not womens.exists():
+        print("  (skipped end-to-end colour check: data/templates not present)")
+        return
+
+    template = ebay_template.load_template(womens)
+    category = template.category_by_id("63862")  # Coats, Jackets & Waistcoats
+    product = Product(
+        sku="QTN02-001-543",
+        master={"Brand": "FRANKIE SHOP", "Gender": "WOMEN", "Colour": "Neutrals",
+                "Category": "Ready to Wear", "SubCat2": "Coats", "Rounded RRP": 295,
+                "Clean Title Description": "FRANKIE SHOP COAT"},
+        measurements={"Size": "XS", "Description": "Good condition."},
+    )
+
+    def fake_ai(system, user, tool_name, input_schema, **kwargs):
+        props = input_schema["properties"]["item_specifics"]["properties"]
+        required = set(input_schema["properties"]["item_specifics"].get("required", []))
+        specifics = {}
+        for name, spec in props.items():
+            if name not in required:
+                continue
+            if spec.get("type") == "array":
+                specifics[name] = spec["items"]["enum"][:1]
+            elif "enum" in spec:
+                specifics[name] = spec["enum"][0]
+            else:
+                specifics[name] = "Cotton"
+        # A colour eBay does not have, so the family fallback is what answers.
+        specifics["C:Colour"] = "Oatmeal Sand Taupe"
+        return {
+            "title": "FRANKIE SHOP Womens Wool Coat Beige XS RRP 295",
+            "condition_id": category.conditions[0][0],
+            "condition_description": "Good condition.",
+            "material_summary": "Wool",
+            "item_specifics": specifics,
+        }
+
+    original = ai_client.call_structured
+    ai_client.call_structured = fake_ai
+    try:
+        with tempfile.TemporaryDirectory() as cache_dir:
+            result = content_generator.generate_for_product(
+                product, category, template, cache_dir, force=True)
+    finally:
+        ai_client.call_structured = original
+
+    colour = result["item_specifics"].get("C:Colour")
+    check("end-to-end: a Neutrals coat is not listed as Purple", colour != "Purple", True)
+    check("end-to-end: it is listed as Beige", colour, "Beige")
 
 
 def main():

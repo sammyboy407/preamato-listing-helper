@@ -1289,6 +1289,47 @@ def test_only_the_problems_ebay_actually_refuses_are_blocking():
     check("a clean listing blocks nothing", validation.blocking_reasons(run(good_row(), size="8")), [])
 
 
+def test_a_colour_family_and_an_unrecognised_size_are_reported():
+    """Neither blocks. Both are named, because both are where a wrong
+    listing hides in a batch that otherwise looks perfect."""
+    from src import ebay_template as et
+
+    neutrals = Product(sku="TEST-001",
+                       master={"Brand": "SIMONE ROCHA", "Gender": "WOMEN", "Colour": "Neutrals"},
+                       measurements={})
+    issues = run(good_row(**{"C:Colour": "Beige"}), product=neutrals, size="8")
+    check("a colour family is reported",
+          any("Neutrals" in m for m in messages(issues, "NOTE")), True)
+    check("and it does not block", validation.blocking_reasons(issues), [])
+
+    plain = Product(sku="TEST-001",
+                    master={"Brand": "SIMONE ROCHA", "Gender": "WOMEN", "Colour": "Black"},
+                    measurements={})
+    check("a real colour is silent",
+          any("listed as" in m for m in messages(run(good_row(**{"C:Colour": "Black"}),
+                                                    product=plain, size="8"), "NOTE")), False)
+
+    # A size eBay does not offer for the category still ships, but is named:
+    # it will not appear in a size-filtered search, and it is where "MM" on
+    # a Canada Goose coat hides.
+    size_spec = {"C:Size": AspectSpec("C:Size", "REQUIRED", ["S", "M", "L", "8", "10"])}
+    named = run(good_row(**{"C:Size": "MM", "Category name": "Women's Clothing > Coats"}),
+                aspects=size_spec, size="8")
+    check("an unrecognised size is reported",
+          any("not one of eBay's values" in m for m in messages(named, "NOTE")), True)
+    check("and it still ships", validation.blocking_reasons(named), [])
+
+    ok = run(good_row(**{"C:Size": "M"}), aspects=size_spec, size="8")
+    check("a recognised size is silent",
+          any("not one of eBay's values" in m for m in messages(ok, "NOTE")), False)
+
+    # No Size aspect in the category at all (footwear) must not start
+    # reporting every shoe in the batch.
+    check("a category with no Size aspect is silent",
+          any("not one of eBay's values" in m
+              for m in messages(run(good_row(**{"C:Size": "MM"}), size="8"), "NOTE")), False)
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

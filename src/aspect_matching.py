@@ -190,6 +190,68 @@ SIZE_ALIASES = {
 }
 
 
+# The account's own colour vocabulary, which is a family of colours rather
+# than a colour. eBay's Colour list has no entry for any of them, and a
+# fuzzy match on the word alone is not just useless but actively wrong:
+# 07.09.26, across all 1,752 products, "Neutrals" (118 items) scored closest
+# to "Purple" and "Metallic" (133) closest to "Yellow". A beige coat listed
+# as purple is worse than no colour at all.
+#
+# These only ever apply as a last resort — the model answers the colour
+# first, reading the item's own title, and a metallic gold bag whose title
+# says gold matches Gold long before this map is consulted. Every listing
+# whose colour comes from one of these families is named in the checks
+# report so it can be eyeballed (validation._check_colour_family).
+#
+# Burgundy is a dark red, not a brown, which is what the fuzzy match made
+# of it. That one is not a guess.
+COLOUR_FAMILY_ALIASES = {
+    "neutrals": "Beige",
+    "neutral": "Beige",
+    "metallic": "Silver",
+    "burgundy": "Red",
+}
+
+
+def match_colour(raw, valid_values: list[str] | None) -> str | None:
+    """eBay colour from the item's own colour text, family words included."""
+    if not raw or not valid_values:
+        return None
+    text = " ".join(str(raw).strip().split())
+    alias = COLOUR_FAMILY_ALIASES.get(text.lower())
+    if alias:
+        return fuzzy_match(alias, valid_values, cutoff=0.9)
+    return fuzzy_match(text, valid_values, cutoff=0.4)
+
+
+# Clothing size markers. eBay's own clothing Size lists carry the marker in
+# front — "IT 50", "EU 40", "US 2", "FR 38" — and the team writes it behind:
+# "50 IT", "34 IT". Same size, written the other way round, and worth a lot
+# because it turns a free-text size into one of eBay's own values, which is
+# what makes a listing show up in a size-filtered search.
+#
+# Sammy briefed the team on 07.09.26 to put the marker on every shoe size.
+# The first clothing file back, 08.09.26, has it on the clothing too.
+_SIZE_MARKERS = ("UK", "EU", "US", "IT", "FR", "JP", "DE", "USA")
+_TRAILING_MARKER_RE = re.compile(
+    r"^\s*(\d+(?:\.\d+)?)\s*[-/]?\s*(" + "|".join(_SIZE_MARKERS) + r")\s*$",
+    re.IGNORECASE)
+_JOINED_MARKER_RE = re.compile(
+    r"^\s*(" + "|".join(_SIZE_MARKERS) + r")\s*[-/]?\s*(\d+(?:\.\d+)?)\s*$",
+    re.IGNORECASE)
+
+
+def _marker_first(raw: str) -> str | None:
+    """"50 IT" and "IT50" -> "IT 50". None when there is no marker to move."""
+    m = _TRAILING_MARKER_RE.match(raw)
+    if m:
+        return f"{m.group(2).upper()} {m.group(1)}"
+    m = _JOINED_MARKER_RE.match(raw)
+    if m and raw.strip().upper() != f"{m.group(1).upper()} {m.group(2)}":
+        return f"{m.group(1).upper()} {m.group(2)}"
+    return None
+
+
 def _size_format_variants(raw: str) -> list[str]:
     """Cheap, unambiguous rewrites of a raw size string worth trying before
     giving up — never a scale conversion (that's a real judgment call, see
@@ -202,6 +264,20 @@ def _size_format_variants(raw: str) -> list[str]:
     well under it). Order doesn't matter for correctness since every variant
     here is equivalent to the original by construction."""
     variants = [raw]
+    # The marker moved to the front, tried BEFORE it is stripped, because
+    # eBay's own clothing lists carry it there: "50 IT" should reach
+    # "IT 50" rather than settle for a bare "50". Where eBay's list has no
+    # marked form (its shoe lists do not), this variant simply matches
+    # nothing and the stripped one below is used exactly as before.
+    marked = _marker_first(raw)
+    if marked:
+        variants.append(marked)
+        # And the bare number, last, for the lists that carry no marked
+        # form at all: men's jeans offer waist inches 24-40 and IT 42-60,
+        # so a Rick Owens "34 IT" has no "IT 34" to match and 34 is the
+        # closer answer than shipping the raw string. Tried after the
+        # marked form so it never wins where eBay does offer one.
+        variants.append(marked.split(" ", 1)[1])
     # "UK 8", "eu38", "US 6" etc — a units prefix, not a different scale.
     no_prefix = re.sub(r"^(uk|eu|us|it|fr)\s*", "", raw, flags=re.IGNORECASE).strip()
     if no_prefix and no_prefix != raw:
