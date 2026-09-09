@@ -112,12 +112,50 @@ def _template_order(product, templates) -> list[int]:
     tariff code say footwear is offered the shoe templates first. Only first,
     not exclusively: if every shoe template says no, the rest are still tried,
     so nothing can be lost by this rule — the worst case is the order it had
-    before."""
+    before.
+
+    And a product is offered its OWN department before anybody else's.
+
+    09.09.26 is why. Of 128 garments, 108 listed and all eighteen womenswear
+    Tops were lost — every single one. menswear_clothing comes before
+    womenswear_clothing alphabetically and it carries "Shirts & Tops > Casual
+    Shirts & Tops", which is a perfectly good answer to the question "where
+    does Tops / WOMEN go?" if nobody has mentioned that a women's template
+    exists. It matched there, C:Department could not then be filled — a
+    women's product in a men's category — and all eighteen were held back.
+
+    Nothing was broken. The category mapping answered a reasonable question
+    reasonably, the department guard caught it, and fix 27 kept them out of
+    the file rather than letting eBay refuse them. It was the ORDER that was
+    wrong: they should never have been asked.
+
+    Same shape as the mules, the slipper and the Boys' Shoes before it. The
+    first template that says yes wins, so what matters is who is asked first.
+    Sammy already had the instinct on 07.09.26 — "we mainly sell mens and
+    womens so these departments should come before kids". This is that rule
+    finished: own department first, then the neutral templates, then everyone
+    else, and kids last of all, which the file ordering already does.
+
+    Still only an ordering. Every template is still tried, so a woman's
+    cufflinks can still land in Men's Jewellery when that is genuinely the
+    only category that fits."""
     order = list(range(len(templates)))
-    if not category_mapping.is_misfiled_footwear(product):
-        return order
-    shoes = [i for i in order if category_mapping.covers_footwear(templates[i])]
-    return shoes + [i for i in order if i not in shoes]
+    product_audience = category_mapping.product_audience(product.m("Gender"))
+
+    def rank(i: int) -> tuple:
+        # A misfiled slipper still meets the shoe templates first.
+        shoe = 0 if (misfiled and category_mapping.covers_footwear(templates[i])) else 1
+        template_audience = category_mapping.template_audience(templates[i])
+        if product_audience in (None, "unisex") or template_audience is None:
+            gender = 1                      # nothing to go on, or a neutral template
+        elif template_audience == product_audience:
+            gender = 0                      # this product's own department
+        else:
+            gender = 2                      # somebody else's
+        return (shoe, gender, i)
+
+    misfiled = category_mapping.is_misfiled_footwear(product)
+    return sorted(order, key=rank)
 
 
 @dataclass
@@ -160,7 +198,7 @@ def run(
     price_percent: float = config.START_PRICE_RATIO * 100,
     combine_output: bool = True,
     on_progress: ProgressFn = _noop,
-) -> tuple[list[TemplateResult], int, list[str], list[str]]:
+) -> tuple[list[TemplateResult], int, list[str], list[str], "HeldBack"]:
     """Runs the full pipeline. Returns (template_results, num_products_considered,
     uncovered_skus, failed, held_back) — uncovered_skus lists products whose
     (Category, SubCat2, Gender) doesn't match any category in ANY of the given

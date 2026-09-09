@@ -483,8 +483,15 @@ def test_a_slipper_filed_as_homeware_is_still_a_shoe():
     check("shoe templates are offered to the slipper first", order[0] in (1, 2), True)
     check("the homeware template is not dropped, only demoted",
           sorted(order), [0, 1, 2, 3])
-    check("everyone else keeps the given order",
-          pipeline._template_order(candle, templates), [0, 1, 2, 3])
+    # The candle is a WOMEN product, so since 09.09.26 it meets the
+    # womenswear template first — see
+    # test_a_product_is_offered_its_own_department_first. It used to keep the
+    # given order; what has to stay true is that nothing is dropped and the
+    # slipper rule still outranks the gender rule.
+    candle_order = pipeline._template_order(candle, templates)
+    check("a women's product meets the womenswear template first",
+          candle_order[0], 3)
+    check("and nothing is dropped for it", sorted(candle_order), [0, 1, 2, 3])
 
     # build_mapping writes under one key and lookup reads under another, so
     # if they ever disagree about a product its mapping is built and then
@@ -1439,6 +1446,80 @@ def test_a_scheduled_listing_actually_carries_its_start_time():
     # No schedule asked for, no column invented.
     plain = build.build_row(product, ai, category, template, {}, None, 60.0)
     check("no schedule, no column", "Schedule Time" in plain, False)
+
+
+def test_a_product_is_offered_its_own_department_first():
+    """09.09.26. Of 128 garments, 108 listed and all EIGHTEEN womenswear Tops
+    were lost — every single one in the file.
+
+    menswear_clothing comes before womenswear_clothing alphabetically and it
+    carries "Shirts & Tops > Casual Shirts & Tops", which is a reasonable
+    answer to "where does Tops / WOMEN go?" if nobody has mentioned that a
+    women's template exists. They matched there, C:Department could not be
+    filled, and fix 27 held all eighteen back.
+
+    Nothing was broken. The order was wrong: they should never have been
+    asked. Same shape as the mules, the slipper and the Boys' Shoes."""
+    from src import pipeline, ebay_template
+
+    paths = pipeline._default_department_templates()
+    if not paths:
+        print("  (skipped: data/templates not present in this checkout)")
+        return
+    names = [p.stem for p in paths]
+    templates = [ebay_template.load_template(p) for p in paths]
+
+    def order_for(gender, **master):
+        p = Product(sku="X", master={"Gender": gender, **master}, measurements={})
+        return [names[i] for i in pipeline._template_order(p, templates)]
+
+    womens = order_for("WOMEN", Category="Ready to Wear", SubCat2="Tops")
+    check("a women's top meets womenswear_clothing before menswear_clothing",
+          womens.index("womenswear_clothing") < womens.index("menswear_clothing"), True)
+    check("and every womenswear template comes first",
+          [n for n in womens[:3]],
+          ["womenswear_accessories", "womenswear_clothing", "womenswear_shoes"])
+
+    mens = order_for("MEN", Category="Ready to Wear", SubCat2="Tops")
+    check("a men's top meets menswear first",
+          [n for n in mens[:3]],
+          ["menswear_accessories", "menswear_clothing", "menswear_shoes"])
+
+    # Kids still last for adults, and first for kids. Sammy, 07.09.26.
+    check("kidswear is last for a women's product", womens[-1], "kidswear")
+    check("and last for a men's product", mens[-1], "kidswear")
+    check("but first for a kids product", order_for("GIRL")[0], "kidswear")
+
+    # Unisex has no own department, so nothing is reordered for it.
+    check("unisex keeps the given order", order_for("UNISEX"), names)
+
+    # Every template is still offered. This is an ordering, never a filter:
+    # a woman's cufflinks must still be able to reach Men's Jewellery when
+    # that is the only category that fits.
+    for gender in ("WOMEN", "MEN", "UNISEX", "GIRL", ""):
+        check(f"{gender!r} is still offered all nine",
+              sorted(order_for(gender)), sorted(names))
+
+    # And the misfiled slipper still meets the shoe templates first, which
+    # is the older rule and has to keep winning over this one.
+    slipper = Product(
+        sku="QTN02-001-613",
+        master={"Category": "Lifestyle", "SubCat2": "Home Accessories", "Gender": "MEN",
+                "Department": "Mens Shoes", "Tariff Code": "6403599900"},
+        measurements={})
+    got = [names[i] for i in pipeline._template_order(slipper, templates)]
+    check("a misfiled slipper meets a shoes template first", "shoes" in got[0], True)
+    check("and its own department's shoes at that", got[0], "menswear_shoes")
+    check("before homeware", got.index("menswear_shoes") < got.index("homeware"), True)
+
+    # The shoe rule outranks the gender rule, and that ordering between the
+    # two is the whole point: EVERY shoe template comes before every
+    # template that is not one. Otherwise womenswear_shoes drops behind
+    # homeware for a men's slipper, and the rule that put the Givenchy in
+    # footwear on 06.09.26 quietly stops applying to half the templates.
+    shoes = [n for n in got if "shoes" in n]
+    check("every shoes template outranks every non-shoes one for a misfiled slipper",
+          got[:len(shoes)], shoes)
 
 
 def main():
