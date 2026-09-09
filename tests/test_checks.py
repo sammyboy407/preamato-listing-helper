@@ -1389,6 +1389,58 @@ def test_a_placeholder_is_only_written_where_ebay_offers_it():
     check("and survives", real["C:Fabric Weight"], "300")
 
 
+def test_a_scheduled_listing_actually_carries_its_start_time():
+    """09.09.26. Every run since the department templates became the default
+    ended with "You set a schedule time, but none of the templates have a
+    Schedule Time column — those listings will start immediately instead."
+
+    True, and pointless. The nine JSON department templates share one fixed
+    19-column header prefix that does not name Schedule Time, so the
+    condition guarding the write could never be satisfied and the setting in
+    the app could never do anything at all. Only a hand-downloaded .xlsx
+    ever got past it.
+
+    It never needed the header. output_headers already adds any column the
+    rows actually carry — that is exactly how every C: item specific reaches
+    the file on a department-template run. Schedule Time rides the same
+    path."""
+    import csv as _csv
+    import tempfile
+    from src import build, ebay_template as et
+
+    category = CategorySpec(category_id="63864", category_name="Women's Clothing > Skirts",
+                            conditions=[(3000, "Pre-owned - Good")])
+    # A department template: the fixed prefix, with no Schedule Time in it.
+    template = EbayTemplate(
+        listing_headers=["*Action(SiteID=UK|Country=GB|Currency=GBP|Version=1193)",
+                         "Custom label (SKU)", "Category ID", "Title", "Start price"],
+        categories=[category], aspects={"63864": {}}, info_rows=[["#INFO"]],
+    )
+    check("the template really has no Schedule Time column",
+          "Schedule Time" in template.listing_headers, False)
+
+    product = make_product()
+    ai = {"title": "SIMONE ROCHA Tiered Mini Skirt White 8 RRP 695", "condition_id": 3000,
+          "condition_description": "Good.", "material_summary": "Cotton", "item_specifics": {}}
+
+    row = build.build_row(product, ai, category, template, {}, "2026-09-12 09:00:00", 60.0)
+    check("the row carries the scheduled time", row.get("Schedule Time"), "2026-09-12 09:00:00")
+
+    # And it has to survive into the file, which is the half that was broken.
+    with tempfile.TemporaryDirectory() as d:
+        out = pathlib.Path(d) / "out.csv"
+        build.write_csv([row], template, out)
+        lines = out.read_text(encoding="utf-8-sig").splitlines()
+        hi = next(i for i, l in enumerate(lines) if l.startswith("*Action"))
+        written = list(_csv.DictReader(lines[hi:]))[0]
+        check("the column reaches the CSV", "Schedule Time" in written, True)
+        check("with the time in it", written["Schedule Time"], "2026-09-12 09:00:00")
+
+    # No schedule asked for, no column invented.
+    plain = build.build_row(product, ai, category, template, {}, None, 60.0)
+    check("no schedule, no column", "Schedule Time" in plain, False)
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

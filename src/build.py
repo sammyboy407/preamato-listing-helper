@@ -224,7 +224,23 @@ def build_row(
     for field_name, value in ai_result.get("item_specifics", {}).items():
         row[field_name] = value
 
-    if schedule_time and "Schedule Time" in template.listing_headers:
+    # Written whenever a schedule time was asked for, not only when the
+    # template's own header row happens to name the column.
+    #
+    # 09.09.26: every run since the department templates became the default
+    # ended with "You set a schedule time, but none of the templates have a
+    # Schedule Time column — those listings will start immediately instead."
+    # That was true and it was pointless. The JSON department templates all
+    # share one fixed 19-column header prefix, which does not include
+    # Schedule Time, so the condition could never be satisfied and the
+    # setting could never do anything. Only a manually downloaded .xlsx
+    # ever passed it.
+    #
+    # It does not need to. output_headers already adds any column the rows
+    # actually carry, which is exactly how every "C:" item-specific reaches
+    # the file on a department-template run. Schedule Time reaches it the
+    # same way now.
+    if schedule_time:
         row["Schedule Time"] = schedule_time
 
     return row

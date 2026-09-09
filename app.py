@@ -287,9 +287,8 @@ schedule_invalid = False
 schedule_enabled = st.checkbox(
     "Schedule listings for a future time (instead of starting immediately)",
     value=False,
-    help="Only takes effect for a template that actually has a Schedule Time column — "
-         "checked automatically once you upload your template(s). Templates without it "
-         "will still list immediately.",
+    help="Listings go live at this time instead of immediately. GMT, on the "
+         "hour, and eBay allows up to three weeks ahead.",
 )
 if schedule_enabled:
     default_dt = datetime.now() + timedelta(days=1)
@@ -304,26 +303,9 @@ if schedule_enabled:
     else:
         schedule_time_str = chosen_dt.strftime(config.SCHEDULE_TIME_FORMAT)
 
-    if template_files:
-        schedule_supported = any(
-            ebay_template.supports_schedule_time_bytes(f.getvalue()) for f in template_files
-        )
-        if not schedule_supported:
-            st.caption("Heads up: none of your uploaded template(s) have a Schedule Time column — listings will start immediately instead.")
-    else:
-        # No manual upload — the department templates (or, failing that, the
-        # built-in catalog) are used instead. Neither currently has a
-        # Schedule Time column (see FIXED_LISTING_HEADERS_PREFIX in
-        # scripts/fetch_ebay_category_aspects.py), so be upfront about it
-        # rather than silently going quiet, matching the manual-upload path
-        # above.
-        default_paths = pipeline._default_department_templates()
-        schedule_supported = (
-            any(ebay_template.supports_schedule_time(p) for p in default_paths)
-            if default_paths else True  # falls back to the built-in catalog, which always has it
-        )
-        if not schedule_supported:
-            st.caption("Heads up: the department templates don't have a Schedule Time column — listings will start immediately instead.")
+    # No "your template has no Schedule Time column" caption any more. The
+    # column is written whenever a time is set, whatever the template's own
+    # header row says — see build.build_row. 09.09.26.
 
 run_clicked = st.button("Generate eBay upload file", type="primary", use_container_width=True)
 
@@ -448,9 +430,11 @@ if run_clicked:
                 )
             if schedule_time_str and not any(row.get("Schedule Time") for r in persisted for row in r["rows"]):
                 st.warning(
-                    "You set a schedule time, but none of the templates that ended up with matched "
-                    "products have a Schedule Time column — those listings will start immediately instead."
+                    "You set a schedule time but it did not reach any row. Tell Claude — this "
+                    "should not happen since 09.09.26."
                 )
+            elif schedule_time_str:
+                st.info(f"Scheduled: these listings go live at {schedule_time_str} GMT, not on upload.")
         except Exception as e:  # noqa: BLE001
             st.error(f"Something went wrong: {e}")
             with st.expander("Technical details"):
