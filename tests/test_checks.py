@@ -776,6 +776,40 @@ def test_internal_references_never_reach_a_buyer():
     check("a clean listing still says nothing", run(good_row(), size="8"), [])
 
 
+def test_a_generic_trademark_never_reaches_a_buyer():
+    """eBay error 240, 09.09.26: "Y PROJECT Womens Velcro Multi Panel
+    Straight Jeans Green 25 RRP 645" was refused because "Velcro" is used
+    generically for a hook-and-loop fastening rather than genuine VELCRO(R)
+    product. The title fix lives in content_generator.generate_for_product,
+    but "Velcro" can reach a listing a second way that never passes through
+    the title logic at all: C:Type is resolved straight from the Master
+    File's own SubCat2 column (content_generator._resolve_deterministic),
+    and the Master File uses "Velcro" there too — VEJA's Recife trainers are
+    recorded as "VEJA RECIFE LOW TOP VELCRO SNEAKER LEATHER" in at least six
+    rows. build_description is the net for exactly this kind of thing
+    already (see test_internal_references_never_reach_a_buyer above for the
+    stockist-name/brand-blurb case), so it has to be the net here too."""
+    from src import build
+
+    product = make_product()
+    text = build.build_description(
+        product,
+        {"condition_description": "Good condition.", "material_summary": "Leather",
+         "item_specifics": {"C:Type": "Velcro Sneaker"}},
+        CATEGORY, make_template(), {})
+    check("Velcro is gone from the description", "velcro" in text.lower(), False)
+    check("the generic term is there instead", "hook-and-loop" in text.lower(), True)
+    check("the rest of the Type line survives", "Sneaker" in text, True)
+
+    # And a description with nothing to scrub is left completely alone.
+    clean = build.build_description(
+        product,
+        {"condition_description": "Good condition.", "material_summary": "Leather",
+         "item_specifics": {"C:Type": "Slide"}},
+        CATEGORY, make_template(), {})
+    check("an unaffected description is untouched", "hook-and-loop" in clean.lower(), False)
+
+
 def test_the_app_follows_the_brand_guidelines():
     """Brand guidelines Version 02, August 2026, plus Sammy's two renames on
     06.09.26.

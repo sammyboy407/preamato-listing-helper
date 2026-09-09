@@ -1043,6 +1043,132 @@ def strip_blocked_brand(title: str, own_brand=None) -> str:
     return re.sub(r"\s{2,}", " ", cleaned).strip()
 
 
+# Trademarked words the source data uses generically, that eBay refuses
+# under error 240 unless the item is genuinely that brand. This is a
+# different failure to TITLE_BLOCKED_BRANDS above: that list is a second
+# BRAND riding along in a collaboration title ("CDG x Nike"); this one is an
+# everyday descriptive WORD that happens to be someone's trademark ("Velcro
+# sneaker", "Velcro strap"), which eBay's own error message says to replace
+# with the generic term it stands for rather than strip out.
+#
+# Observed: QTN02-002-741 (Y/PROJECT jeans, 09.09.26) was refused —
+# "Y PROJECT Womens Velcro Multi Panel Straight Jeans Green 25 RRP 645" —
+# with error 240: "Use the term Velcro in your listing title only if your
+# item was made by VELCRO(R) Companies... please go back and remove Velcro
+# from your title and use a descriptive term, such as 'hook and loop
+# closure', instead." The Master File uses "Velcro" the same way for VEJA's
+# Recife trainers (at least six rows, e.g. "VEJA Recife Low Top Velcro
+# Sneaker Leather") — none of those had reached a title yet, but the same
+# refusal is waiting the first time one does, so the fix is general rather
+# than a one-off edit to this single jeans title.
+#
+# Grows the same way TITLE_BLOCKED_BRANDS does: by evidence, not by
+# guessing every trademark eBay might object to.
+GENERIC_TRADEMARK_REPLACEMENTS = {
+    "velcro": "hook-and-loop",
+}
+
+_GENERIC_TRADEMARK_RE = re.compile(
+    r"\b(" + "|".join(re.escape(k) for k in GENERIC_TRADEMARK_REPLACEMENTS) + r")\b",
+    re.IGNORECASE,
+)
+
+
+def scrub_generic_trademarks(text: str) -> str:
+    """Replaces a trademarked word used as everyday descriptive language
+    (e.g. "Velcro" for a hook-and-loop strap) with the generic term eBay's
+    own error 240 message asks for, so the listing ships instead of being
+    refused.
+
+    Capitalisation is preserved so the replacement reads naturally in a
+    title-cased title, a shouted all-caps brand line, or a plain sentence:
+    "Velcro" -> "Hook-And-Loop", "VELCRO" -> "HOOK-AND-LOOP",
+    "velcro" -> "hook-and-loop"."""
+    text = str(text or "")
+    if not text.strip():
+        return text
+
+    def _replace(match: re.Match) -> str:
+        word = match.group(0)
+        replacement = GENERIC_TRADEMARK_REPLACEMENTS[word.lower()]
+        if word.isupper():
+            return replacement.upper()
+        if word[0].isupper():
+            return "-".join(part.capitalize() for part in replacement.split("-"))
+        return replacement
+
+    return _GENERIC_TRADEMARK_RE.sub(_replace, text)
+
+
+# C:Type fallback for when the Master File's SubCat2 column is too generic
+# to fuzzy-match a category's real Type options.
+#
+# 09.09.26. fix33 (and the reboot that made it take effect) correctly
+# routed 18 womenswear Tops out of the wrong menswear category and into
+# "Ready to Wear > Tops & Shirts" (53159), where they always belonged. That
+# category requires C:Type from five real options — Blouse, Button-Up,
+# Polo, Tank, T-Shirt — and content_generator's only source for it is
+# SubCat2, which just says "Tops" for every one of them.
+# fuzzy_match("Tops", these five, cutoff=0.5) scores 0.46 at best
+# (Button-Up), under the cutoff every other deterministic match uses, so
+# all eighteen came back with C:Type empty and were held out by the
+# required-field guard — the exact same shape of loss fix33 had just fixed
+# for C:Department, one field over.
+#
+# This was invisible while they were wrongly landing in menswear's "Shirts
+# & Tops > Casual Shirts & Tops" (57990), which has exactly one Type value
+# (Button-Up) — the single-value shortcut a few lines up in
+# content_generator.py filled it regardless of what SubCat2 said, so it
+# looked like it was working.
+#
+# Reads the product's own title instead, the same trust-the-source-text
+# reasoning already used for colour-from-photo and the Mules/Pumps split:
+# JACQUEMUS "Le Polo Marino..." says Polo on its face; RICK OWENS
+# "...Draped Shoulder Blouse..." says Blouse. Checked most specific to
+# least, so "Twisted T-Shirt" matches T-Shirt before the bare "shirt"
+# pattern (Button-Up) is even tried, and OUR LEGACY's "Envelop
+# Shirt...Corseted Long Sleeve..." matches the literal "Shirt" before the
+# softer "corset" hint would have pulled it toward Tank instead.
+_TYPE_TITLE_PATTERNS: list[tuple[str, list[str]]] = [
+    ("T-Shirt", [r"\bt[\s-]?shirt\b", r"\btee\b", r"\bsweatshirt\b", r"\bjersey\b"]),
+    ("Polo", [r"\bpolo\b"]),
+    ("Blouse", [r"\bblouse\b", r"\bturtleneck\b"]),
+    ("Button-Up", [r"\bshirt\b"]),
+    ("Tank", [r"\btank\b", r"\bcami\b", r"\bvest\b", r"\bbustier\b",
+              r"\bcorset(?:ed)?\b", r"\bstrapless\b", r"\bhalter\b"]),
+]
+
+# A title with none of the words above (RICK OWENS' "Shroud HNK SS Washed
+# Denim Top" — no shirt, blouse, polo or tee word anywhere in it) falls
+# through to Blouse, eBay's own closest thing to a catch-all for a dressy
+# top that isn't a tee, tank or polo. Only used when Blouse is actually one
+# of this category's real values — never invented for a category whose
+# Type list doesn't offer it.
+_TYPE_TITLE_FALLBACK = "Blouse"
+
+
+def match_type_from_title(title: str | None, valid_values: list[str] | None) -> str | None:
+    """Guesses C:Type from the product's own internal title when the raw
+    SubCat2 value doesn't fuzzy-match any of a category's real options.
+    See the comment above _TYPE_TITLE_PATTERNS for why this exists and how
+    the priority order was chosen.
+
+    Never returns a value that isn't actually in valid_values — for a
+    category none of these patterns fit, this returns None exactly as a
+    failed fuzzy_match would, rather than guessing."""
+    if not title or not valid_values:
+        return None
+    lowered = str(title).lower()
+    available = {v.lower(): v for v in valid_values}
+    for canonical, patterns in _TYPE_TITLE_PATTERNS:
+        real_value = available.get(canonical.lower())
+        if not real_value:
+            continue
+        if any(re.search(pattern, lowered) for pattern in patterns):
+            return real_value
+    return available.get(_TYPE_TITLE_FALLBACK.lower())
+
+
 def enforce_title_gender(title: str, department, brand=None) -> str:
     """Puts Mens or Womens straight after the brand.
 

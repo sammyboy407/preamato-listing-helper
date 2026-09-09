@@ -920,6 +920,23 @@ def test_changing_a_sizing_rule_invalidates_the_cache():
         aspect_matching.EU_TO_UK_MENS_SHOE_SIZE.clear()
         aspect_matching.EU_TO_UK_MENS_SHOE_SIZE.update(original)
 
+    fallback_original = aspect_matching._TYPE_TITLE_FALLBACK
+    try:
+        aspect_matching._TYPE_TITLE_FALLBACK = "Tank"
+        check("changing the C:Type fallback word changes the cache fingerprint",
+              content_generator._sizing_fingerprint() != baseline, True)
+    finally:
+        aspect_matching._TYPE_TITLE_FALLBACK = fallback_original
+
+    patterns_original = list(aspect_matching._TYPE_TITLE_PATTERNS)
+    try:
+        aspect_matching._TYPE_TITLE_PATTERNS.append(("Tank", [r"\bnope\b"]))
+        check("changing the C:Type title patterns changes the cache fingerprint",
+              content_generator._sizing_fingerprint() != baseline, True)
+    finally:
+        aspect_matching._TYPE_TITLE_PATTERNS.clear()
+        aspect_matching._TYPE_TITLE_PATTERNS.extend(patterns_original)
+
     check("fingerprint is stable when nothing changed",
           content_generator._sizing_fingerprint(), baseline)
 
@@ -954,6 +971,16 @@ def test_changing_a_sizing_rule_invalidates_the_cache():
         # hashing it would bust the whole cache for a reworded sentence.
         "child_band_size",
         "strip_blocked_brand", "collaborating_brand",
+        # Same reasoning as strip_blocked_brand above: this decides the
+        # finished title (and, via build.build_description, the finished
+        # description), so an edit to it has to invalidate every cached
+        # listing. Added 09.09.26 after "Velcro" reached a real title.
+        "scrub_generic_trademarks",
+        # Decides C:Type — a required field, cached with everything else
+        # under the same key — whenever SubCat2 is too generic to
+        # fuzzy-match. Added 09.09.26 after eighteen Tops came back with
+        # C:Type empty once they reached their real category.
+        "match_type_from_title",
     }
     missing = sorted(must_be_hashed - hashed)
     if missing:
@@ -1046,6 +1073,302 @@ def test_a_second_brand_is_stripped_from_the_title():
     check("and nothing is flagged on it", am.collaborating_brand(own, "Nike"), None)
     check("the collaborating brand is named for the report",
           am.collaborating_brand(refused, "COMME DES GARCON HOMME PLUS"), "NIKE")
+
+
+def test_a_generic_trademark_is_replaced_not_stripped():
+    """eBay error 240, 09.09.26 — a different cause of the same error code as
+    the second-brand case above. "Y PROJECT Womens Velcro Multi Panel
+    Straight Jeans Green 25 RRP 645" was refused outright: "Use the term
+    Velcro in your listing title only if your item was made by VELCRO(R)
+    Companies... please go back and remove Velcro from your title and use a
+    descriptive term, such as 'hook and loop closure', instead."
+
+    Unlike a blocked second brand, the word isn't dropped — eBay's own
+    message says to replace it with the generic term it stands for, so the
+    listing keeps describing the feature, just without the trademark. The
+    Master File uses "Velcro" the same way for VEJA's Recife trainers (at
+    least six rows, e.g. "VEJA Recife Low Top Velcro Sneaker Leather"), so
+    this has to hold for more than the one jeans title that happened to fail
+    first."""
+    refused = "Y PROJECT Womens Velcro Multi Panel Straight Jeans Green 25 RRP 645"
+    out = am.scrub_generic_trademarks(refused)
+    check("Velcro is gone", "velcro" in out.lower(), False)
+    check("replaced with the generic term, not deleted",
+          "hook-and-loop" in out.lower(), True)
+    check("capitalised to match a title-cased title",
+          "Hook-And-Loop" in out, True)
+    check("the rest of the title survives untouched",
+          out, "Y PROJECT Womens Hook-And-Loop Multi Panel Straight Jeans Green 25 RRP 645")
+
+    # Case is preserved rather than forced, so the word reads naturally
+    # wherever it lands.
+    check("all caps in, all caps out",
+          am.scrub_generic_trademarks("VELCRO SNEAKER"), "HOOK-AND-LOOP SNEAKER")
+    check("lower case in, lower case out",
+          am.scrub_generic_trademarks("a velcro strap"), "a hook-and-loop strap")
+
+    # A word that merely contains "velcro" is not touched — this is a whole
+    # word swap, the same discipline strip_blocked_brand uses.
+    check("no partial-word matches",
+          am.scrub_generic_trademarks("Velcroed shut"), "Velcroed shut")
+
+    check("empty text is left alone", am.scrub_generic_trademarks(""), "")
+    check("text with nothing to scrub is untouched",
+          am.scrub_generic_trademarks("PRADA Nylon Tote Black RRP 895"),
+          "PRADA Nylon Tote Black RRP 895")
+
+    # It has to survive the whole pipeline, not just exist as a function —
+    # the same discipline the colour-family test above holds itself to.
+    import tempfile
+    from src import ai_client, content_generator, ebay_template
+    from src.data_loader import Product
+
+    templates_dir = Path(__file__).resolve().parent.parent / "data" / "templates"
+    womens = templates_dir / "womenswear_clothing.json"
+    if not womens.exists():
+        print("  (skipped end-to-end trademark title check: data/templates not present)")
+        return
+
+    template = ebay_template.load_template(womens)
+    category = template.category_by_id("11554")  # Women's Clothing > Jeans
+    product = Product(
+        sku="QTN02-002-741",
+        master={"Brand": "Y PROJECT", "Gender": "WOMEN", "Colour": "Green",
+                "Category": "Ready to Wear", "SubCat2": "Jeans", "Rounded RRP": 645,
+                "Clean Title Description": "Y PROJECT VELCRO MULTI PANEL STRAIGHT JEANS"},
+        measurements={"Size": "25", "Description": "Good condition.",
+                      "Images 2D link": "https://cdn.orbitvu.co/share/AAA/1/still/view"},
+    )
+
+    def fake_ai(system, user, tool_name, input_schema, **kwargs):
+        if tool_name == "pick_colour":
+            return {"colour": "Green", "reasoning": "stub"}
+        props = input_schema["properties"]["item_specifics"]["properties"]
+        required = set(input_schema["properties"]["item_specifics"].get("required", []))
+        specifics = {}
+        for name, spec in props.items():
+            if name not in required:
+                continue
+            if spec.get("type") == "array":
+                specifics[name] = spec["items"]["enum"][:1]
+            elif "enum" in spec:
+                specifics[name] = spec["enum"][0]
+            else:
+                specifics[name] = "Cotton"
+        return {
+            # The exact wording the model actually returned on 09.09.26.
+            "title": "Y PROJECT Womens Velcro Multi Panel Straight Jeans Green 25 RRP 645",
+            "condition_id": category.conditions[0][0],
+            "condition_description": "Good condition.",
+            "material_summary": "100% Cotton",
+            "item_specifics": specifics,
+        }
+
+    original = ai_client.call_structured
+    ai_client.call_structured = fake_ai
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            result = content_generator.generate_for_product(
+                product, category, template, d, force=True)
+    finally:
+        ai_client.call_structured = original
+
+    check("end-to-end: Velcro never reaches the finished title",
+          "velcro" in result["title"].lower(), False)
+    check("end-to-end: the generic term is there instead",
+          "hook-and-loop" in result["title"].lower(), True)
+
+
+def test_a_generic_subcat2_falls_back_to_the_title_for_c_type():
+    """09.09.26. fix33 (and the reboot that made it take effect) correctly
+    routed 18 womenswear Tops out of the wrong menswear category and into
+    "Ready to Wear > Tops & Shirts" (53159) — where they always belonged.
+    That category requires C:Type from five real options: Blouse,
+    Button-Up, Polo, Tank, T-Shirt. SubCat2 just says "Tops" for every one
+    of them, fuzzy_match("Tops", those five, cutoff=0.5) scores 0.46 at
+    best, and all eighteen came back with C:Type empty — held out of the
+    upload file by the same required-field guard that caught the
+    C:Department bug fix33 fixed, one field over.
+
+    This was invisible while they were wrongly landing in menswear's
+    "Shirts & Tops > Casual Shirts & Tops" (57990), which has exactly one
+    Type value (Button-Up) — the single-value shortcut filled it
+    regardless of what SubCat2 said, so it looked like it was working.
+
+    match_type_from_title reads the product's own title instead. These are
+    the actual eighteen, straight from the 09.09.26 batch."""
+    values = ["Blouse", "Button-Up", "Polo", "Tank", "T-Shirt"]
+    real_titles = {
+        # A collared, long-sleeve SHIRT — the plain word, no "t-" in front.
+        "16ARLINGTON MARLEY CLLR LS WRINKLED SHIRT BLUE": "Button-Up",
+        "ATTICO Black Cotton T-Shirt Round Neck Cut-Out Side": "T-Shirt",
+        # A "vest" with no other type word in the title.
+        "CECILIE BAHNSEN GEO GINGHAM VEST JACQUARD BROWN": "Tank",
+        "ENTIRE STUDIOS Cami Top White Squared Neck": "Tank",
+        "FRANKIE SHOP Tulia Turtleneck Mesh Top": "Blouse",
+        "JACQUEMUS Le Polo Marino Banana Jacquard Top": "Polo",
+        "JIL SANDER Pinstripe Shirt Mohair Wool Blend Collared": "Button-Up",
+        "MAGDA BUTRYM Strapless Ruched Corset Top": "Tank",
+        "MARQUES'ALMEIDA White Lace T-Shirt": "T-Shirt",
+        # Says "Shirt" AND "Corseted" — the literal garment noun has to win
+        # over the softer Tank-leaning descriptor, or this comes back Tank
+        # on a long-sleeve item that plainly isn't one.
+        "OUR LEGACY Envelop Shirt Corseted Long Sleeve": "Button-Up",
+        "OUR LEGACY Twisted T-Shirt": "T-Shirt",
+        "RICK OWENS Bustier Strapless Washed Denim Top": "Tank",
+        "RICK OWENS Draped Shoulder Blouse": "Blouse",
+        # No shirt/blouse/polo/tee word anywhere — the fallback case.
+        "RICK OWENS SHROUD HNK SS WASHED DNM TOP BLUE": "Blouse",
+        "RICK OWENS STRAPLESS DENIM COATED C/O BUSTIER TOP GOLD": "Tank",
+        "THOM BROWNE Sweatshirt Cotton Jersey Top": "T-Shirt",
+        "Y PROJECT Triple Collar Fitted T-Shirt": "T-Shirt",
+        "ZIMMERMANN CRUSH SMOCK HNK LS PRINT BLOUSE RED": "Blouse",
+    }
+    for title, expected in real_titles.items():
+        check(f"{title!r} -> {expected}",
+              am.match_type_from_title(title, values), expected)
+
+    # A title that is nothing but the fallback word still gets it, and case
+    # doesn't matter either way.
+    check("case-insensitive match", am.match_type_from_title(
+        "some brand polo shirt blue", values), "Polo")
+    check("case-insensitive fallback word", am.match_type_from_title(
+        "SOME BRAND SWEATSHIRT TOP", values), "T-Shirt")
+
+    # Nothing to work with.
+    check("no title, no guess", am.match_type_from_title(None, values), None)
+    check("empty title, no guess", am.match_type_from_title("", values), None)
+    check("no candidate values, no guess",
+          am.match_type_from_title("JACQUEMUS Le Polo Marino", []), None)
+    check("candidate values is None, no guess",
+          am.match_type_from_title("JACQUEMUS Le Polo Marino", None), None)
+
+    # Blouse only ever comes back as the fallback when it is actually one
+    # of this category's real values — never invented for a category whose
+    # Type list doesn't offer it, e.g. a Jackets category with different
+    # options entirely.
+    check("no fallback available for a category that doesn't offer it",
+          am.match_type_from_title("RICK OWENS Shroud Top", ["Bomber Jacket", "Blazer"]),
+          None)
+
+    # A category real garment-type word still wins even when it isn't the
+    # fallback value itself.
+    check("a real word still matches when Blouse isn't offered at all",
+          am.match_type_from_title("JACQUEMUS Le Polo Marino Top",
+                                    ["Button-Up", "Polo", "Tank", "T-Shirt"]),
+          "Polo")
+
+    # Only whole words match — "Velcroed" not being touched by
+    # scrub_generic_trademarks above is the same discipline. "Shirting" is
+    # not "Shirt", so this does NOT come back Button-Up; it falls through
+    # to the generic fallback like any other title with no real word in it.
+    check("no partial-word match on a garment word",
+          am.match_type_from_title("SHIRTING FABRIC SAMPLE", values), "Blouse")
+    check("and with no fallback available, the partial word still isn't matched",
+          am.match_type_from_title("SHIRTING FABRIC SAMPLE", ["Button-Up", "Polo"]), None)
+
+    # This has to survive the whole pipeline, the same discipline every
+    # other deterministic aspect in this file holds itself to.
+    import tempfile
+    from src import content_generator, ebay_template
+    from src.data_loader import Product
+
+    templates_dir = Path(__file__).resolve().parent.parent / "data" / "templates"
+    womens = templates_dir / "womenswear_clothing.json"
+    if not womens.exists():
+        print("  (skipped end-to-end C:Type title-fallback check: data/templates not present)")
+        return
+
+    template = ebay_template.load_template(womens)
+    tops_spec = template.aspects["53159"]["C:Type"]
+    check("the real category still offers the same five values",
+          sorted(tops_spec.values), sorted(values))
+
+    def resolve(title, subcat2="Tops"):
+        product = Product(
+            sku="TEST-TOP",
+            master={"Brand": "TEST BRAND", "Gender": "WOMEN", "SubCat2": subcat2,
+                    "Clean Title Description": title},
+            measurements={},
+        )
+        return content_generator._resolve_deterministic("C:Type", product, tops_spec)
+
+    check("_resolve_deterministic falls back to the title for a real category",
+          resolve("JACQUEMUS Le Polo Marino Banana Jacquard Top"), "Polo")
+    check("and for the fallback case",
+          resolve("RICK OWENS SHROUD HNK SS WASHED DNM TOP BLUE"), "Blouse")
+
+    # A SubCat2 that DOES fuzzy-match still wins over the title — the title
+    # fallback only ever fires once the direct match has already failed.
+    # Deliberately conflicting: SubCat2 says "Polo" (a real, exact match)
+    # while the title's own wording says T-Shirt, so this only stays
+    # "Polo" if the title is never consulted at all.
+    check("a real SubCat2 match still comes first, even when the title disagrees",
+          resolve("SOME BRAND Classic Fit T-Shirt", subcat2="Polo"), "Polo")
+
+    # No title and no usable SubCat2: still None, exactly as before this
+    # fix — never a wrong guess, just an honest "can't tell".
+    check("no title and an unmatchable SubCat2 is still refused, not guessed",
+          resolve(None), None)
+
+    # The single-value shortcut a few lines above the title fallback is
+    # unchanged: a category with only one Type value never needs the title
+    # at all, whatever SubCat2 or the title say.
+    jeans_spec = ebay_template.AspectSpec("C:Type", "REQUIRED", ["Straight"])
+    product = Product(sku="TEST-JEANS", master={"SubCat2": "Jeans", "Gender": "WOMEN",
+                                                 "Clean Title Description": "Anything at all"},
+                       measurements={})
+    check("a single-value category still takes its one value unconditionally",
+          content_generator._resolve_deterministic("C:Type", product, jeans_spec), "Straight")
+
+    # Full pipeline: one real blocked SKU end to end, with the real prompt
+    # machinery stubbed out exactly as the trademark test above does it.
+    from src import ai_client
+
+    category = template.category_by_id("53159")
+    product = Product(
+        sku="QTN02-001-782",
+        master={"Brand": "JACQUEMUS", "Gender": "WOMEN", "Colour": "Yellow",
+                "Category": "Ready to Wear", "SubCat2": "Tops", "Rounded RRP": 645,
+                "Clean Title Description": "JACQUEMUS Le Polo Marino Banana Jacquard Top"},
+        measurements={"Size": "M", "Description": "Good condition.",
+                      "Images 2D link": "https://cdn.orbitvu.co/share/BBB/1/still/view"},
+    )
+
+    def fake_ai(system, user, tool_name, input_schema, **kwargs):
+        if tool_name == "pick_colour":
+            return {"colour": "Yellow", "reasoning": "stub"}
+        props = input_schema["properties"]["item_specifics"]["properties"]
+        required = set(input_schema["properties"]["item_specifics"].get("required", []))
+        specifics = {}
+        for name, spec in props.items():
+            if name not in required:
+                continue
+            if spec.get("type") == "array":
+                specifics[name] = spec["items"]["enum"][:1]
+            elif "enum" in spec:
+                specifics[name] = spec["enum"][0]
+            else:
+                specifics[name] = "Cotton"
+        return {
+            "title": "JACQUEMUS Womens Le Polo Marino Banana Jacquard Top Yellow M RRP 645",
+            "condition_id": category.conditions[0][0],
+            "condition_description": "Good condition.",
+            "material_summary": "100% Cotton",
+            "item_specifics": specifics,
+        }
+
+    original = ai_client.call_structured
+    ai_client.call_structured = fake_ai
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            result = content_generator.generate_for_product(
+                product, category, template, d, force=True)
+    finally:
+        ai_client.call_structured = original
+
+    check("end-to-end: C:Type is filled, not empty",
+          result["item_specifics"].get("C:Type"), "Polo")
 
 
 def test_the_title_says_who_the_item_is_for():

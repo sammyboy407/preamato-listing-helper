@@ -88,6 +88,8 @@ def _sizing_sources() -> list:
         aspect_matching._drop_dangling_markers,
         aspect_matching.strip_blocked_brand, aspect_matching.collaborating_brand,
         aspect_matching.scrub_internal_references, _inspection_flag,
+        aspect_matching.scrub_generic_trademarks,
+        aspect_matching.match_type_from_title,
         aspect_matching.match_shoe_size_uk, aspect_matching.match_shoe_size_eu,
         aspect_matching.match_size, aspect_matching.size_display,
         aspect_matching.match_colour, aspect_matching._marker_first,
@@ -141,6 +143,10 @@ def _sizing_fingerprint() -> str:
     parts.append(repr(sorted(aspect_matching.TITLE_GENDER_WORDS.items())))
     parts.append(repr(sorted(aspect_matching.TITLE_BLOCKED_BRANDS)))
     parts.append(repr(aspect_matching.BLOCKED_RETAILERS))
+    parts.append(repr(sorted(aspect_matching.GENERIC_TRADEMARK_REPLACEMENTS.items())))
+    parts.append(aspect_matching._GENERIC_TRADEMARK_RE.pattern)
+    parts.append(repr(aspect_matching._TYPE_TITLE_PATTERNS))
+    parts.append(aspect_matching._TYPE_TITLE_FALLBACK)
     for pattern in (
         aspect_matching._TITLE_GENDER_RE,
         aspect_matching._TITLE_SIZE_RE,
@@ -309,10 +315,19 @@ def _resolve_deterministic(name: str, product: Product, spec: ebay_template.Aspe
             # answer — matching SubCat2 ("Knitwear") against it just fails
             # and left Type blank on the 04.09.26 batch.
             return spec.values[0]
+        if spec.values:
+            matched = aspect_matching.fuzzy_match(raw, spec.values, cutoff=0.5) if raw else None
+            if matched:
+                return matched
+            # 09.09.26: SubCat2 just says "Tops" for every Women's Clothing
+            # > Tops & Shirts product — too generic to fuzzy-match a real
+            # multi-option Type list (see match_type_from_title's comment
+            # in aspect_matching.py). Falls back to the product's own
+            # title before leaving a required field empty.
+            return aspect_matching.match_type_from_title(
+                m.get("Clean Title Description"), spec.values)
         if not raw:
             return None
-        if spec.values:
-            return aspect_matching.fuzzy_match(raw, spec.values, cutoff=0.5)
         return str(raw).strip()
     return None
 
@@ -852,6 +867,14 @@ def generate_for_product(
     # which eBay's own policy explicitly permits.
     result["title"] = aspect_matching.strip_blocked_brand(
         result.get("title", ""), brand_raw)
+
+    # A trademarked word used generically instead of a brand riding along —
+    # error 240 again, but the other cause of it. 09.09.26: "Y PROJECT Womens
+    # Velcro Multi Panel Straight Jeans Green 25 RRP 645" was refused because
+    # "Velcro" describes a hook-and-loop fastening in the source data, not
+    # genuine VELCRO(R) product. Same error code as the blocked-brand case
+    # above, different fix: swap the word, don't cut it.
+    result["title"] = aspect_matching.scrub_generic_trademarks(result.get("title", ""))
 
     # The prompt above asks for none of this. The prompt is not a guarantee —
     # the same is true of the brand casing and the size — so internal grading

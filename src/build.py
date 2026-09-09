@@ -157,8 +157,14 @@ def build_description(
     # Final net. The condition text is already scrubbed upstream, but the
     # brand blurb is generated and cached separately (brand_blurb.py), so a
     # stockist name written into a blurb would otherwise reach the listing
-    # without ever passing through the content generator.
-    return aspect_matching.scrub_internal_references("<br>\n".join(lines))
+    # without ever passing through the content generator. Same reasoning for
+    # the generic-trademark scrub (09.09.26, "Velcro") — Type and Material
+    # here can come straight from the Master File's own wording, which never
+    # passes through the title's scrub above.
+    description = "<br>\n".join(lines)
+    description = aspect_matching.scrub_internal_references(description)
+    description = aspect_matching.scrub_generic_trademarks(description)
+    return description
 
 
 def compute_start_price(rrp, price_percent: float) -> float | None:
