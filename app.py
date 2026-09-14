@@ -204,6 +204,106 @@ st.caption(
 if "results" not in st.session_state:
     st.session_state.results = None
     st.session_state.num_considered = None
+if "report" not in st.session_state:
+    # Everything a run has to say about what did NOT list. Kept in session
+    # state for the same reason the results are: Streamlit re-runs the whole
+    # script on any widget interaction, and a download click is a widget
+    # interaction. Rendering these inside the `if run_clicked:` block meant
+    # the first click of "Download" wiped every failure off the screen,
+    # leaving the successful file and no record of the 4 SKUs missing from
+    # it. 14.09.26, after a Brook St run where 4 of 18 did not list.
+    st.session_state.report = None
+
+
+def _report_text(rep: dict) -> str:
+    """The same report as plain text, so it can be copied out, pasted into
+    a message, or kept as a file next to the upload it belongs to."""
+    out = [
+        "Preamato Listing Helper — run report",
+        f"Run at:     {rep['ran_at']}",
+        f"Output:     {rep['output_names'] or '(no file written)'}",
+        "",
+        f"{rep['considered']} product(s) processed, "
+        f"{rep['total_rows']} listing(s) written, {rep['not_listed']} not listed.",
+    ]
+    if rep["schedule_time"]:
+        out += ["", f"Scheduled to go live at {rep['schedule_time']} GMT, not on upload."]
+    if rep["held_back"]:
+        out += ["", f"KEPT OUT of the upload file — eBay would refuse these "
+                    f"({len(rep['held_back'])}). The upload file itself is safe as it is:"]
+        out += [f"  - {sku}: {'; '.join(reasons)}" for sku, reasons in rep["held_back"]]
+    if rep["failed"]:
+        out += ["", f"FAILED, not in the file ({len(rep['failed'])}). "
+                    f"Fix at source and re-run:"]
+        out += [f"  - {f}" for f in rep["failed"]]
+    if rep["uncovered"]:
+        out += ["", f"NOT COVERED by any uploaded template ({len(rep['uncovered'])}):"]
+        out += [f"  - {sku}" for sku in rep["uncovered"]]
+    if not (rep["held_back"] or rep["failed"] or rep["uncovered"]):
+        out += ["", "Nothing was held back, failed or skipped. Every product listed."]
+    return "\n".join(out) + "\n"
+
+
+def _render_report(rep: dict) -> None:
+    """Renders the run report. Called from the persistent bottom section
+    rather than from inside the run block, so it survives a re-run."""
+    st.info(
+        f"{rep['considered']} product(s) processed, {rep['total_rows']} listing(s) "
+        f"written, {rep['not_listed']} not listed."
+    )
+    if rep["held_back"]:
+        st.error(
+            f"{len(rep['held_back'])} listing(s) would be refused by eBay and have been "
+            f"KEPT OUT of the upload file. The file above is safe to upload as it is. "
+            f"These need fixing at source and re-running:"
+        )
+        for sku, reasons in rep["held_back"]:
+            st.markdown(f"- **{sku}** — {'; '.join(reasons)}")
+        if rep["held_back_path"] and Path(rep["held_back_path"]).exists():
+            with open(rep["held_back_path"], "rb") as fh:
+                st.download_button(
+                    f"Download {Path(rep['held_back_path']).name}",
+                    fh,
+                    file_name=Path(rep["held_back_path"]).name,
+                    mime="text/csv",
+                    use_container_width=True,
+                    key="held_back_download",
+                )
+    if rep["failed"]:
+        st.error(
+            f"{len(rep['failed'])} product(s) failed and are NOT in the file. "
+            f"They need fixing and re-running:"
+        )
+        for f in rep["failed"]:
+            st.markdown(f"- {f}")
+    if rep["uncovered"]:
+        st.warning(
+            f"{len(rep['uncovered'])} product(s) aren't covered by any given template's "
+            f"categories and were skipped: {', '.join(rep['uncovered'])}"
+        )
+    if rep["schedule_missed"]:
+        st.warning(
+            "You set a schedule time but it did not reach any row. Tell Claude — this "
+            "should not happen since 09.09.26."
+        )
+    elif rep["schedule_time"]:
+        st.info(f"Scheduled: these listings go live at {rep['schedule_time']} GMT, not on upload.")
+
+    text = _report_text(rep)
+    with st.expander("Run report — copy or save this before you download", expanded=False):
+        st.caption(
+            "Everything above as plain text. Use the copy button in the corner of the "
+            "box, or download it as a file to keep next to the upload."
+        )
+        st.code(text, language=None)
+        st.download_button(
+            "Download this report (.txt)",
+            text.encode("utf-8"),
+            file_name=rep["report_name"],
+            mime="text/plain",
+            use_container_width=True,
+            key="run_report_download",
+        )
 
 st.subheader("1. Your Anthropic API key")
 api_key = st.text_input(
@@ -383,58 +483,31 @@ if run_clicked:
             st.session_state.results = persisted
             st.session_state.num_considered = considered
             total_rows = sum(len(r["rows"]) for r in persisted)
+
+            schedule_missed = bool(
+                schedule_time_str
+                and not any(row.get("Schedule Time") for r in persisted for row in r["rows"])
+            )
+            stem = Path(output_path).stem
+            st.session_state.report = {
+                "ran_at": datetime.now().strftime("%d.%m.%y %H:%M"),
+                "considered": considered,
+                "total_rows": total_rows,
+                "not_listed": len(failed) + len(uncovered) + len(held_back),
+                "held_back": list(held_back.reasons),
+                "held_back_path": held_back.path,
+                "failed": list(failed),
+                "uncovered": list(uncovered),
+                "schedule_time": schedule_time_str,
+                "schedule_missed": schedule_missed,
+                "output_names": ", ".join(Path(r["output_path"]).name for r in persisted),
+                "report_name": f"{stem}_run report.txt",
+            }
+
             if persisted:
                 st.success(f"Done — generated {total_rows} listing(s) across {len(persisted)} output file(s).")
             else:
                 st.info("None of these products fall into a category covered by the template(s) you uploaded — no output file produced.")
-            # Reconciliation, shown before anything else: on a big batch a
-            # skipped SKU used to leave no trace but one log line that had
-            # already scrolled out of the box, so a run could quietly come
-            # back short and look like a success.
-            st.info(
-                f"{considered} product(s) processed, {total_rows} listing(s) written, "
-                f"{len(failed) + len(uncovered) + len(held_back)} not listed."
-            )
-            # First, and in red. These are the rows eBay would refuse, and
-            # they are deliberately NOT in the file that was just written —
-            # so the download button above is safe to upload as it stands.
-            if held_back:
-                st.error(
-                    f"{len(held_back)} listing(s) would be refused by eBay and have been "
-                    f"KEPT OUT of the upload file. The file above is safe to upload as it is. "
-                    f"These need fixing at source and re-running:"
-                )
-                for sku, reasons in held_back.reasons:
-                    st.markdown(f"- **{sku}** — {'; '.join(reasons)}")
-                if held_back.path and Path(held_back.path).exists():
-                    with open(held_back.path, "rb") as f:
-                        st.download_button(
-                            f"Download {Path(held_back.path).name}",
-                            f,
-                            file_name=Path(held_back.path).name,
-                            mime="text/csv",
-                            use_container_width=True,
-                            key="held_back_download",
-                        )
-            if failed:
-                st.error(
-                    f"{len(failed)} product(s) failed and are NOT in the file. "
-                    f"They need fixing and re-running:"
-                )
-                for f in failed:
-                    st.markdown(f"- {f}")
-            if uncovered:
-                st.warning(
-                    f"{len(uncovered)} product(s) aren't covered by any given template's "
-                    f"categories and were skipped: {', '.join(uncovered)}"
-                )
-            if schedule_time_str and not any(row.get("Schedule Time") for r in persisted for row in r["rows"]):
-                st.warning(
-                    "You set a schedule time but it did not reach any row. Tell Claude — this "
-                    "should not happen since 09.09.26."
-                )
-            elif schedule_time_str:
-                st.info(f"Scheduled: these listings go live at {schedule_time_str} GMT, not on upload.")
         except Exception as e:  # noqa: BLE001
             st.error(f"Something went wrong: {e}")
             with st.expander("Technical details"):
@@ -442,13 +515,13 @@ if run_clicked:
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
-if st.session_state.results:
+if st.session_state.results or st.session_state.report:
     st.subheader("Results")
     preview_cols = [
         "Custom label (SKU)", "Title", "Description", "Category ID", "Category name",
         "Start price", "Condition ID", "C:Brand",
     ]
-    for r in st.session_state.results:
+    for r in (st.session_state.results or []):
         if not Path(r["output_path"]).exists():
             continue
         categories_label = ", ".join(name.rsplit("/", 1)[-1] for name in r["category_names"])
@@ -467,3 +540,8 @@ if st.session_state.results:
         ]
         st.dataframe(preview_data, use_container_width=True, hide_index=True)
         st.markdown("")
+
+    # After the files, so the download buttons are the first thing reached,
+    # but on the same re-run-proof footing as them.
+    if st.session_state.report:
+        _render_report(st.session_state.report)

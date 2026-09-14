@@ -335,6 +335,54 @@ def _resolve_deterministic(name: str, product: Product, spec: ebay_template.Aspe
     return None
 
 
+def _coerce_item_specifics(raw) -> dict:
+    """The AI's item_specifics, as a dict, whatever shape it actually came
+    back in.
+
+    09.09.26, QTN02-001-880 (Kartik Research), crashed outright with
+    "'str' object has no attribute 'get'". The schema asks for
+    item_specifics as a nested object, but — exactly as the comment on the
+    enum validation below already says about the values INSIDE it — the
+    API does not hard-enforce JSON-schema types server-side. That turned
+    out to be true of the container's own shape too: for that product the
+    tool call returned item_specifics as a JSON-ENCODED STRING.
+
+    `result.get("item_specifics", {}) or {}` only guards against the field
+    being missing. A truthy string sails straight past `or {}`, and the
+    very next line calls .get() on it.
+
+    A dict passes through unchanged. A string is parsed and used only if
+    it decodes to an object. Anything else — unparseable, valid JSON that
+    isn't an object, or the wrong type entirely — becomes an empty dict,
+    exactly as a cleanly-missing field always did, so the enum validation
+    and the deterministic overlay downstream produce the same safe
+    fallbacks they always would have. Never a crash, never a silently
+    wrong specific.
+
+    Deliberately NOT in _sizing_sources(): this only stops a crash, and a
+    product that crashed has nothing cached to invalidate. Adding it would
+    throw away every cached listing and re-run the whole batch through the
+    AI for no gain.
+
+    Re-applied 14.09.26. It was written on 09.09.26 and is documented as
+    deployed, but no trace of it survived in this repo — no helper, no
+    test, no commit — and BRK02-001-023 hit the identical crash on the
+    Brook St run. Lost in a later deploy, most likely overwritten by a zip
+    that predated it. The cause of it resurfacing now is the same as last
+    time: fix 37 bumped the sizing fingerprint, which forced a real
+    regeneration for SKUs that had been quietly serving from cache."""
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
 def _primary_image(product: Product) -> str | None:
     """The first photograph of the item, which is the front-on studio shot."""
     urls = split_image_urls(product.measurements.get("Images 2D link"))
@@ -899,7 +947,7 @@ def generate_for_product(
     result["title"] = aspect_matching.trim_title(
         result.get("title", ""), size_for_title, limit=80)
 
-    specifics = result.get("item_specifics", {}) or {}
+    specifics = _coerce_item_specifics(result.get("item_specifics"))
 
     # 3. Validate what the AI returned. The API does not hard-enforce
     #    JSON-schema `enum` server-side — it's guidance, not a guarantee —

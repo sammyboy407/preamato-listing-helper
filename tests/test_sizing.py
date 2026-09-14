@@ -1481,6 +1481,37 @@ def test_all_in_ones_resolves_c_type_for_jumpsuits_and_playsuits():
           "Boot")
 
 
+def test_a_stringified_item_specifics_does_not_crash_the_product():
+    """09.09.26, QTN02-001-880: "'str' object has no attribute 'get'" — a
+    real exception, not a validation message. The AI returned
+    item_specifics as a JSON-encoded string instead of an object, and
+    `result.get("item_specifics", {}) or {}` only guards against the field
+    being absent, so the string went straight through to .get().
+
+    Re-applied 14.09.26 after BRK02-001-023 hit the identical crash on the
+    Brook St run: the guard was documented as live but was not in the repo
+    at all. This test is what stops it going missing a third time."""
+    from src import content_generator as cg
+    coerce = cg._coerce_item_specifics
+
+    check("a real dict passes through untouched",
+          coerce({"C:Brand": "CHLOE"}), {"C:Brand": "CHLOE"})
+    check("a JSON-encoded object is parsed",
+          coerce('{"C:Brand": "CHLOE"}'), {"C:Brand": "CHLOE"})
+    check("unparseable JSON becomes an empty dict",
+          coerce("{not json at all"), {})
+    check("valid JSON that isn't an object becomes an empty dict",
+          coerce('["C:Brand", "CHLOE"]'), {})
+    check("a JSON scalar becomes an empty dict", coerce('"CHLOE"'), {})
+    check("missing becomes an empty dict", coerce(None), {})
+    check("the wrong type entirely becomes an empty dict", coerce(42), {})
+    check("an empty string becomes an empty dict", coerce(""), {})
+
+    # The bug was that a TRUTHY string sailed past `or {}`. An empty dict
+    # and an empty string both have to land in the same safe place.
+    check("the old `or {}` case still works", coerce({}), {})
+
+
 def test_the_title_says_who_the_item_is_for():
     """Sammy, 06.09.26: "we need to add Mens Womens after each brand in the
     title, this is optimal for ebay search results".
