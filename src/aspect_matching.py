@@ -1129,6 +1129,21 @@ def scrub_generic_trademarks(text: str) -> str:
 # pattern (Button-Up) is even tried, and OUR LEGACY's "Envelop
 # Shirt...Corseted Long Sleeve..." matches the literal "Shirt" before the
 # softer "corset" hint would have pulled it toward Tank instead.
+#
+# 14.09.26. The same shape again, one department over: QTN02-001-232
+# (BURC AKYOL, SubCat2 "All In Ones") was held out of the 14.09.26 batch
+# twice. "Women's Clothing > Jumpsuits & Playsuits" (3009) requires C:Type
+# from exactly two values — One-Piece and Outfit/Set — and "All In Ones"
+# is the business's own merchandising word, which eBay does not use at
+# all, so it fuzzy-matches neither. Two values also means the
+# single-value shortcut in content_generator can't rescue it the way it
+# rescues Boots ("Boot") and Jumpers & Cardigans ("Jumper").
+#
+# Here the distinction isn't which style of garment it is, it's whether
+# it's one garment or two, so the One-Piece nouns are checked BEFORE the
+# set words: a title saying "Jumpsuit" is a one-piece whatever else it
+# says, the same reasoning that puts the literal "Shirt" ahead of the
+# softer "corseted" hint above.
 _TYPE_TITLE_PATTERNS: list[tuple[str, list[str]]] = [
     ("T-Shirt", [r"\bt[\s-]?shirt\b", r"\btee\b", r"\bsweatshirt\b", r"\bjersey\b"]),
     ("Polo", [r"\bpolo\b"]),
@@ -1136,15 +1151,37 @@ _TYPE_TITLE_PATTERNS: list[tuple[str, list[str]]] = [
     ("Button-Up", [r"\bshirt\b"]),
     ("Tank", [r"\btank\b", r"\bcami\b", r"\bvest\b", r"\bbustier\b",
               r"\bcorset(?:ed)?\b", r"\bstrapless\b", r"\bhalter\b"]),
+    # Jumpsuits & Playsuits (3009). One garment, whatever it's called.
+    ("One-Piece", [r"\bjumpsuit\b", r"\bplaysuit\b", r"\bcatsuit\b",
+                   r"\bbodysuit\b", r"\bunitard\b", r"\bleotard\b",
+                   r"\bromper\b", r"\bboiler\s?suit\b", r"\bdungarees?\b",
+                   r"\boveralls\b", r"\ball[\s-]?in[\s-]?ones?\b",
+                   r"\bone[\s-]?piece\b"]),
+    # Two garments sold together. "set" is guarded against "Set-in
+    # Sleeve", which is one of this same category's C:Sleeve Type values
+    # and would otherwise turn a jumpsuit into an outfit on a hyphen.
+    ("Outfit/Set", [r"\bco[\s-]?ords?\b", r"\btwo[\s-]?piece\b",
+                    r"\b2[\s-]?piece\b", r"\btracksuit\b",
+                    r"\bsets?\b(?![\s-]in\b)"]),
 ]
 
 # A title with none of the words above (RICK OWENS' "Shroud HNK SS Washed
 # Denim Top" — no shirt, blouse, polo or tee word anywhere in it) falls
-# through to Blouse, eBay's own closest thing to a catch-all for a dressy
-# top that isn't a tee, tank or polo. Only used when Blouse is actually one
-# of this category's real values — never invented for a category whose
-# Type list doesn't offer it.
-_TYPE_TITLE_FALLBACK = "Blouse"
+# through to a catch-all. Checked in order; the first one that is actually
+# a real value for THIS category wins, and if none of them is, nothing is
+# returned — a fallback is never invented for a category whose Type list
+# doesn't offer it.
+#
+#   Blouse     — eBay's own closest thing to a catch-all for a dressy top
+#                that isn't a tee, tank or polo (53159).
+#   One-Piece  — an "All In Ones" product routed into Jumpsuits &
+#                Playsuits (3009) is one garment by definition; it takes
+#                a positive set word in the title to make it an outfit.
+#
+# The two lists never overlap, so the order between them never decides
+# anything — it is an ordered tuple rather than a set only so that a
+# future category offering two of these has a defined answer.
+_TYPE_TITLE_FALLBACKS: tuple[str, ...] = ("Blouse", "One-Piece")
 
 
 def match_type_from_title(title: str | None, valid_values: list[str] | None) -> str | None:
@@ -1166,7 +1203,11 @@ def match_type_from_title(title: str | None, valid_values: list[str] | None) -> 
             continue
         if any(re.search(pattern, lowered) for pattern in patterns):
             return real_value
-    return available.get(_TYPE_TITLE_FALLBACK.lower())
+    for fallback in _TYPE_TITLE_FALLBACKS:
+        real_value = available.get(fallback.lower())
+        if real_value:
+            return real_value
+    return None
 
 
 def enforce_title_gender(title: str, department, brand=None) -> str:

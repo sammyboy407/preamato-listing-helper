@@ -146,7 +146,7 @@ def _sizing_fingerprint() -> str:
     parts.append(repr(sorted(aspect_matching.GENERIC_TRADEMARK_REPLACEMENTS.items())))
     parts.append(aspect_matching._GENERIC_TRADEMARK_RE.pattern)
     parts.append(repr(aspect_matching._TYPE_TITLE_PATTERNS))
-    parts.append(aspect_matching._TYPE_TITLE_FALLBACK)
+    parts.append(repr(aspect_matching._TYPE_TITLE_FALLBACKS))
     for pattern in (
         aspect_matching._TITLE_GENDER_RE,
         aspect_matching._TITLE_SIZE_RE,
@@ -324,6 +324,9 @@ def _resolve_deterministic(name: str, product: Product, spec: ebay_template.Aspe
             # multi-option Type list (see match_type_from_title's comment
             # in aspect_matching.py). Falls back to the product's own
             # title before leaving a required field empty.
+            # 14.09.26: and "All In Ones" for every Jumpsuits & Playsuits
+            # product, for the same reason — it is the business's own
+            # merchandising word, not one eBay uses.
             return aspect_matching.match_type_from_title(
                 m.get("Clean Title Description"), spec.values)
         if not raw:

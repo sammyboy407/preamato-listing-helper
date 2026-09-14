@@ -920,13 +920,13 @@ def test_changing_a_sizing_rule_invalidates_the_cache():
         aspect_matching.EU_TO_UK_MENS_SHOE_SIZE.clear()
         aspect_matching.EU_TO_UK_MENS_SHOE_SIZE.update(original)
 
-    fallback_original = aspect_matching._TYPE_TITLE_FALLBACK
+    fallback_original = aspect_matching._TYPE_TITLE_FALLBACKS
     try:
-        aspect_matching._TYPE_TITLE_FALLBACK = "Tank"
+        aspect_matching._TYPE_TITLE_FALLBACKS = ("Tank",)
         check("changing the C:Type fallback word changes the cache fingerprint",
               content_generator._sizing_fingerprint() != baseline, True)
     finally:
-        aspect_matching._TYPE_TITLE_FALLBACK = fallback_original
+        aspect_matching._TYPE_TITLE_FALLBACKS = fallback_original
 
     patterns_original = list(aspect_matching._TYPE_TITLE_PATTERNS)
     try:
@@ -1369,6 +1369,116 @@ def test_a_generic_subcat2_falls_back_to_the_title_for_c_type():
 
     check("end-to-end: C:Type is filled, not empty",
           result["item_specifics"].get("C:Type"), "Polo")
+
+
+def test_all_in_ones_resolves_c_type_for_jumpsuits_and_playsuits():
+    """14.09.26. QTN02-001-232 (BURC AKYOL) was one of 9 SKUs missed from
+    the 14.09.26 batch. The other 8 were a blank Size cell and listed as
+    soon as the sizes were entered. This one never had a size problem —
+    it had UK XS throughout — and was held out twice on:
+
+        C:Type is required by eBay for this category but is empty
+
+    "Women's Clothing > Jumpsuits & Playsuits" (3009) requires C:Type from
+    exactly two values, One-Piece and Outfit/Set, and SubCat2 says "All In
+    Ones" — the business's own merchandising word, which eBay does not use
+    anywhere. It fuzzy-matches neither, and two values means the
+    single-value shortcut can't rescue it either. Same shape as the Tops
+    loss above, one department over.
+
+    Unlike Tops, the question here isn't which style of garment it is,
+    it's whether it's one garment or two."""
+    values = ["One-Piece", "Outfit/Set"]
+
+    one_piece = [
+        # The SKU that started this. No garment noun at all in the title,
+        # so it rides on the fallback — which is the common case for this
+        # category, not the exception.
+        "BURC AKYOL Black Silk Draped Asymmetric All In One",
+        "BURC AKYOL Womens Black Silk Blend Sleeveless Ruched Black",
+        "NORMA KAMALI Black Jersey Wide Leg Jumpsuit",
+        "ZIMMERMANN Floral Linen Playsuit Tie Waist",
+        "ALAIA Black Stretch Knit Catsuit Long Sleeve",
+        "WOLFORD Black Bodysuit Round Neck",
+        "STELLA MCCARTNEY Denim Dungarees Blue",
+        "GANNI Cotton Romper Striped",
+    ]
+    for title in one_piece:
+        check(f"{title!r} -> One-Piece",
+              am.match_type_from_title(title, values), "One-Piece")
+
+    two_pieces = [
+        "MAISON LA PLAGE Printed Viscose Two Piece Set",
+        "JACQUEMUS Linen Co-Ord Beige",
+        "THE FRANKIE SHOP Knit Co Ord Grey",
+        "PALM ANGELS Cotton Tracksuit Black",
+        "TOTEME Wool Blend Trouser Set Camel",
+    ]
+    for title in two_pieces:
+        check(f"{title!r} -> Outfit/Set",
+              am.match_type_from_title(title, values), "Outfit/Set")
+
+    # A one-piece noun beats a set word in the same title, the same way
+    # the literal "Shirt" beats "Corseted" for Tops above. A jumpsuit sold
+    # with a belt is still one garment.
+    check("a garment noun wins over a set word",
+          am.match_type_from_title("RICK OWENS Jumpsuit And Belt Set Black", values),
+          "One-Piece")
+
+    # "Set-in Sleeve" is one of this same category's own C:Sleeve Type
+    # values. A bare \bset\b would match it on the hyphen and turn a
+    # one-piece into an outfit.
+    check("Set-in Sleeve is not a set",
+          am.match_type_from_title("CECILIE BAHNSEN Set-in Sleeve Draped Black", values),
+          "One-Piece")
+    # And the same discipline as "Shirting" is not "Shirt".
+    check("no partial-word match on corset",
+          am.match_type_from_title("MAGDA BUTRYM Corset Detail Black", values),
+          "One-Piece")
+
+    # The new values are never invented for a category that doesn't offer
+    # them, and the Tops values are never invented for this one.
+    check("One-Piece is not invented for a Tops category",
+          am.match_type_from_title("SOME BRAND Jumpsuit Black",
+                                    ["Blouse", "Button-Up", "Polo", "Tank", "T-Shirt"]),
+          "Blouse")
+    check("Blouse is not invented for a Jumpsuits category",
+          am.match_type_from_title("SOME BRAND Blouse Black", values), "One-Piece")
+    check("neither fallback is invented for a category offering neither",
+          am.match_type_from_title("SOME BRAND Jumpsuit Black",
+                                    ["Bomber Jacket", "Blazer"]),
+          None)
+
+    # A real SubCat2 match still wins over the title when both are
+    # available and disagree — the title is only ever consulted after the
+    # fuzzy match has already failed.
+    from src import content_generator as cg
+    from src.data_loader import Product
+    from src.ebay_template import AspectSpec
+    spec = AspectSpec(name="C:Type", level="REQUIRED", multi=False,
+                      values=["One-Piece", "Outfit/Set"])
+
+    def product_with(subcat2):
+        return Product(sku="QTN02-001-232",
+                       master={"SubCat2": subcat2,
+                               "Clean Title Description": "BRAND Jumpsuit Black"},
+                       measurements={})
+
+    check("an exact SubCat2 value still wins over the title",
+          cg._resolve_deterministic("C:Type", product_with("Outfit/Set"), spec),
+          "Outfit/Set")
+    check("and a title-resolved value fills the gap when it doesn't",
+          cg._resolve_deterministic("C:Type", product_with("All In Ones"), spec),
+          "One-Piece")
+
+    # The single-value shortcut above the fuzzy match is untouched: a
+    # category with one Type value still answers with it, without ever
+    # consulting the title.
+    one_value = AspectSpec(name="C:Type", level="REQUIRED", multi=False,
+                           values=["Boot"])
+    check("a single-value Type list still short-circuits",
+          cg._resolve_deterministic("C:Type", product_with("All In Ones"), one_value),
+          "Boot")
 
 
 def test_the_title_says_who_the_item_is_for():
