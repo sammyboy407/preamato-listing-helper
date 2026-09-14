@@ -1347,7 +1347,8 @@ def trim_title(title: str, size_for_display: str | None = None, limit: int = 80)
 # against "Cotton" scores 0.55.
 _MATERIAL_SECTION_RE = re.compile(
     r"\b(?:outer\s+shell|shell|lining|lined|main|body|outer|inner|trim|"
-    r"fabric\s*\d*|composition)\b\s*[:\-]?", re.IGNORECASE)
+    r"fabric\s*\d*|composition|tessuto\s+primario|tessuto|second)\b\s*[:\-]?",
+    re.IGNORECASE)
 _MATERIAL_LABEL_RE = re.compile(r"(?<![A-Za-z])[ML]\s*:", re.IGNORECASE)
 _MATERIAL_PERCENT_RE = re.compile(r"\d+(?:\.\d+)?\s*%?")
 
@@ -1387,6 +1388,28 @@ MATERIAL_SYNONYMS = {
     "stainless steel": "Stainless Steel",
     "zinc alloy": "Zinc Alloy",
     "polyamide/nylon": "Polyamide",
+    # PBT is a polyester — a thermoplastic one, used for stretch. eBay's
+    # list has no PBT, and "Polyester" is both true and the value a buyer
+    # would filter on. QTN02-001-502, Entire Studios cami: "Polybutylene
+    # Terephthalate (PBT) 17 viscose 83".
+    "polybutylene terephthalate pbt": "Polyester",
+    "polybutylene terephthalate": "Polyester",
+    "pbt": "Polyester",
+    "pet": "Polyester",
+    "elastomultiester": "Polyester",
+    # From a coverage pass over the 626 active listings, 14.09.26. Every
+    # one of these is a real composition string off a live listing.
+    "cow leather": "Leather",
+    "cowhide": "Leather",
+    "lamb skin": "Lambskin Leather",
+    "regenerative cotton": "Cotton",
+    "recycled wool": "Wool",
+    "cotone": "Cotton",        # Italian labels reach the file verbatim:
+    "seta": "Silk",            # "Tessuto Primario: 100% Cotone"
+    "lana": "Wool",
+    "lino": "Linen",
+    "viscosa": "Viscose",
+    "poliestere": "Polyester",
 }
 
 # Words that appear in compositions but name no fibre eBay recognises, so
