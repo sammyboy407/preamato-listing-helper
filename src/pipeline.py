@@ -257,6 +257,24 @@ def run(
         )
     on_progress(f"{len(products)} products to process.", 0.05)
 
+    # Pre-flight, before a single AI call. Sammy, 14.09.26: "i want all
+    # items to have RRP". A missing RRP means a £0 start price, which
+    # validation blocks, so the product does not list — and until now the
+    # only way to find that out was to wait for the whole run and read the
+    # held-back list. BRK02-001-026 cost three separate runs that way.
+    #
+    # Named here instead, within seconds of pressing Generate, so the
+    # Master File can be fixed before the expensive part happens rather
+    # than after it. Deliberately not fatal: a batch where one row is
+    # missing an RRP should still list the other forty.
+    no_rrp = [p.sku for p in products if not (p.m("Rounded RRP") or 0)]
+    if no_rrp:
+        on_progress(
+            f"HEADS UP before the slow part: {len(no_rrp)} product(s) have no RRP in the "
+            f"Master File, so they will price at £0 and be held out of the upload file. "
+            f"Stop now, add the RRP, and re-run if you want them listed: "
+            f"{', '.join(no_rrp)}", 0.05)
+
     if template_paths:
         label = "department templates" if used_default_departments else "eBay template(s)"
         on_progress(f"Loading {len(template_paths)} {label}...", 0.07)

@@ -192,6 +192,13 @@ def build_row(
 
     rrp = m.get("Rounded RRP") or 0
     start_price = compute_start_price(rrp, price_percent)
+    # No RRP means no price to take a percentage of. Rather than ship a £0
+    # row that eBay refuses and validation blocks, fall back to a flat
+    # figure — see config.FALLBACK_START_PRICE for why, and for what it
+    # costs. The RRP field itself is left alone: the listing says the RRP
+    # is not recorded rather than claiming this number is one.
+    if not start_price and config.FALLBACK_START_PRICE:
+        start_price = config.FALLBACK_START_PRICE
 
     pic_urls = split_image_urls(meas.get("Images 2D link"))
 

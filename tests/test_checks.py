@@ -152,6 +152,63 @@ def test_photos_and_price():
           any("price" in m for m in messages(run(good_row(), size="8"))), False)
 
 
+def test_a_missing_rrp_blocks_the_listing_and_the_fallback_stays_off():
+    """Sammy, 14.09.26, twice in one day.
+
+    First: "please can this stop happening set start price of whatver to
+    150", after BRK02-001-026 was held out of three runs for one empty
+    cell. Then, having seen it work: "i dont like this - i want all items
+    to have RRP".
+
+    She was right to switch it off. £150 on an item worth £2,000 is worse
+    than a listing that does not go out, and 26 unlisted Brook St items had
+    no RRP at the time — the bags and shoes, Fendi to Manolo.
+
+    So the shipped behaviour is: a missing RRP blocks, exactly as it did
+    before, and pipeline.run names the SKUs within seconds of a run
+    starting so the Master File gets fixed before the AI is called. This
+    test pins the OFF state, and pins the mechanism still working if it is
+    ever switched back on."""
+    from src import build, config
+
+    check("the fallback ships switched off", config.FALLBACK_START_PRICE, None)
+    check("no RRP means no price", build.compute_start_price(None, 50), None)
+    check("and a zero price is still blocking",
+          any(i.blocking and "zero or missing" in i.message
+              for i in run(good_row(**{"Start price": 0, "OriginalRetailPrice": 0}))),
+          True)
+    check("a real RRP is unaffected either way",
+          build.compute_start_price(500, 50), 250)
+    check("and nothing is flagged as fallback-priced",
+          any("PRICED BY FALLBACK" in m
+              for m in messages(run(good_row(**{"Start price": 150,
+                                                "OriginalRetailPrice": 0})))),
+          False)
+
+    # Switched on, it has to price AND name every listing it touches —
+    # naming them is the only thing that made it defensible at all.
+    original = config.FALLBACK_START_PRICE
+    try:
+        config.FALLBACK_START_PRICE = 150.0
+        msgs = messages(run(good_row(**{"Start price": 150, "OriginalRetailPrice": 0})))
+        hit = [m for m in msgs if "PRICED BY FALLBACK" in m]
+        check("switched on, a fallback-priced listing is named once", len(hit), 1)
+        check("and it says why", "no RRP is recorded" in hit[0], True)
+        check("and it says what to do", "Add the RRP" in hit[0], True)
+        check("a genuine £150 listing is still silent",
+              any("PRICED BY FALLBACK" in m
+                  for m in messages(run(good_row(**{"Start price": 150,
+                                                    "OriginalRetailPrice": 400})))),
+              False)
+        check("a true zero is blocked even with the fallback on",
+              any(i.blocking and "zero or missing" in i.message
+                  for i in run(good_row(**{"Start price": 0, "OriginalRetailPrice": 0}))),
+              True)
+    finally:
+        config.FALLBACK_START_PRICE = original
+    check("and it is left switched off afterwards", config.FALLBACK_START_PRICE, None)
+
+
 def test_a_bad_measurement_names_the_likely_reading():
     """Sammy, 04.09.26: garments are measured laying flat, so a pit to pit of
     230 is a slipped decimal for 23. Saying so turns a puzzle into a two

@@ -33,7 +33,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from . import aspect_matching, ebay_template
+from . import aspect_matching, config, ebay_template
 from .data_loader import Product, split_image_urls
 
 MAX_TITLE_LENGTH = 80
@@ -198,6 +198,20 @@ def _check_price(sku, row, issues):
 
     if price <= 0:
         issues.append(Issue(sku, "REVIEW", "start price is zero or missing", blocking=True))
+    elif not rrp and config.FALLBACK_START_PRICE and price == config.FALLBACK_START_PRICE:
+        # 14.09.26. Sammy's call: a missing RRP no longer stops a product
+        # listing, it prices at config.FALLBACK_START_PRICE instead. That
+        # figure owes nothing to what the item is — the same £150 covers a
+        # £140 top and a £2,000 bag — so every listing it touches is named
+        # here. Not blocking, on purpose: blocking it would put us straight
+        # back to the behaviour this replaced. But it is the loudest thing
+        # in the report short of a block, and these listings are normally
+        # scheduled a fortnight out, so there is time to correct one.
+        issues.append(Issue(
+            sku, "REVIEW",
+            f"PRICED BY FALLBACK at £{price:.0f} — no RRP is recorded for this SKU, so "
+            f"this price is not based on the item's value. Add the RRP to the Master "
+            f"File and re-run, or change the price by hand before it goes live."))
     elif rrp and price > rrp:
         issues.append(Issue(sku, "REVIEW", f"start price £{price:.0f} is above the RRP of £{rrp:.0f}"))
 
