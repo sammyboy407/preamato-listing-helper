@@ -1324,3 +1324,136 @@ def trim_title(title: str, size_for_display: str | None = None, limit: int = 80)
             break
         kept.append(word)
     return " ".join(kept)
+
+
+# C:Material, read off the composition rather than guessed.
+#
+# 14.09.26. C:Material is PREFERRED in every clothing category and eBay
+# allows several values at once, and it was blank on every listing this
+# account has ever produced. Not a bug: _split_aspects skips any
+# non-Required closed list over LARGE_LIST_THRESHOLD values, and
+# C:Material has 51 to 98 depending on category, so it never reached the
+# model at all.
+#
+# It never needed to. The composition is already recorded, per garment, by
+# a person holding it: "SHELL 94% VISCOSE 6% ELASTANE". That is better
+# evidence than anything a model would infer from a photograph, and it
+# costs nothing to read.
+#
+# The matching is deliberately strict — a synonym table plus exact
+# matching, with similarity only as a last resort at a high cutoff. Same
+# reasoning as match_brand: these are short words from a closed
+# vocabulary, and a loose threshold produces confident nonsense. "Cupro"
+# against "Cotton" scores 0.55.
+_MATERIAL_SECTION_RE = re.compile(
+    r"\b(?:outer\s+shell|shell|lining|lined|main|body|outer|inner|trim|"
+    r"fabric\s*\d*|composition)\b\s*[:\-]?", re.IGNORECASE)
+_MATERIAL_LABEL_RE = re.compile(r"(?<![A-Za-z])[ML]\s*:", re.IGNORECASE)
+_MATERIAL_PERCENT_RE = re.compile(r"\d+(?:\.\d+)?\s*%?")
+
+# Grown by evidence, exactly like TITLE_BLOCKED_BRANDS and
+# GENERIC_TRADEMARK_REPLACEMENTS. Every entry below came off a real
+# composition string in the QTN02 or Brook St parcels. Left side is what
+# suppliers write, right side is what eBay calls it.
+MATERIAL_SYNONYMS = {
+    "spandex": "Elastane",
+    "spandex/elastane": "Elastane",
+    "lycra": "Elastane",
+    "rayon": "Viscose",
+    "organic cotton": "Cotton",
+    "recycled polyester": "Polyester",
+    "recycled cotton": "Cotton",
+    "virgin wool": "Wool",
+    "merino wool": "Wool",
+    "lambswool": "Wool",
+    "linen/flax": "Linen",
+    "flax": "Linen",
+    "calf leather": "Leather",
+    "calfskin": "Leather",
+    "calf skin": "Leather",
+    "cowskin": "Leather",
+    "goat skin": "Leather",
+    "goatskin": "Leather",
+    "sheepskin": "Leather",
+    "lambskin": "Lambskin Leather",
+    "genuine leather": "Leather",
+    "calf suede": "Suede",
+    "calf hair": "Leather",
+    "pony hair": "Leather",
+    "thermoplastic polyurethane": "Polyurethane",
+    "tpu": "Polyurethane",
+    "pu": "Polyurethane",
+    "pvc": "Vinyl",
+    "stainless steel": "Stainless Steel",
+    "zinc alloy": "Zinc Alloy",
+    "polyamide/nylon": "Polyamide",
+}
+
+# Words that appear in compositions but name no fibre eBay recognises, so
+# they are dropped rather than forced onto a wrong value. "Other fibres"
+# is the supplier's own placeholder; "Mousseline" is a weave, not a fibre;
+# "Methyl Methacrylate" is the acrylic resin a Simone Rocha bag is moulded
+# from, and calling that "Acrylic" (a knitting yarn, to a buyer) would be
+# worse than leaving it out.
+MATERIAL_IGNORED = {
+    "other fibres", "other fibre", "other", "mousseline", "methyl methacrylate",
+    "rhinestone", "glass", "resin", "rubber", "brass", "gold", "silver",
+    "metal", "hardware", "various", "n/a", "na", "unknown", "pl",
+}
+
+
+def _material_candidates(raw: str) -> list[str]:
+    """The fibre names in a composition string, in the order written."""
+    text = _MATERIAL_LABEL_RE.sub(" ", str(raw))
+    text = _MATERIAL_SECTION_RE.sub(" ", text)
+    text = _MATERIAL_PERCENT_RE.sub("|", text)
+    parts = re.split(r"[|,;/\n\r]+", text) if "/" not in raw.lower() else \
+        re.split(r"[|,;\n\r]+", text)
+    out = []
+    for part in parts:
+        name = re.sub(r"[^A-Za-z /\-]+", " ", part)
+        name = re.sub(r"\s+", " ", name).strip(" -/")
+        if name and name.lower() not in MATERIAL_IGNORED:
+            out.append(name)
+    return out
+
+
+def match_materials(raw, valid_values: list[str] | None, limit: int = 6) -> list[str]:
+    """Every material named in a composition string, as this category's own
+    values. Order is the order they were written, which is the order they
+    appear on the garment's label — i.e. most of the garment first.
+
+    Returns [] rather than guessing when nothing matches: C:Material is
+    Preferred, never Required, so a blank costs nothing and a wrong fibre
+    is a returns problem.
+    """
+    if not valid_values:
+        return []
+    texts = [str(r) for r in (raw if isinstance(raw, (list, tuple)) else [raw]) if r]
+    if not texts:
+        return []
+
+    lower_map = {v.lower(): v for v in valid_values}
+    squash_map = {_squash(v): v for v in valid_values}
+    found: list[str] = []
+
+    for text in texts:
+        for name in _material_candidates(text):
+            key = name.lower()
+            if key in MATERIAL_IGNORED:
+                continue
+            canonical = MATERIAL_SYNONYMS.get(key, name)
+            hit = (lower_map.get(canonical.lower())
+                   or squash_map.get(_squash(canonical))
+                   or fuzzy_match(canonical, valid_values, cutoff=0.92))
+            if hit and hit not in found:
+                found.append(hit)
+
+    # A composition that is one fibre at 100% gets eBay's own "100% X"
+    # value where the category offers it — it is a real, separate,
+    # more-specific option and buyers filter on it.
+    if len(found) == 1 and re.search(r"\b100\b", " ".join(texts)):
+        exact = lower_map.get(f"100% {found[0]}".lower())
+        if exact:
+            return [exact]
+    return found[:limit]

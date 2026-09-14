@@ -152,6 +152,113 @@ def test_photos_and_price():
           any("price" in m for m in messages(run(good_row(), size="8"))), False)
 
 
+def test_the_output_filename_carries_the_time():
+    """14.09.26 had five runs — the QTN02 re-run, the Brook St batch, and
+    three attempts at BRK02-001-026 — and every one wrote to
+    'Ebay-Upload-14.09.26.csv'. Only the last survived, and it took the
+    NEEDS ATTENTION file and the checks report beside it with it, so the
+    record of what was held back went too."""
+    from datetime import datetime
+    from src import pipeline
+
+    morning = pipeline.default_output_filename(datetime(2026, 9, 14, 9, 5))
+    evening = pipeline.default_output_filename(datetime(2026, 9, 14, 16, 42))
+    check("the date is still there", "14.09.26" in morning, True)
+    check("and so is the time", morning, "Ebay-Upload-14.09.26-0905.csv")
+    check("two runs the same day cannot collide", morning == evening, False)
+    check("still a .csv", evening.endswith(".csv"), True)
+
+
+def test_a_wrong_sheet_name_says_which_file_to_use():
+    """You uploaded the working copy instead of the master twice in one
+    afternoon, 14.09.26, and both times got a raw Python traceback:
+    "KeyError: 'Worksheet Stock Parcel does not exist.'" — which says
+    nothing about what to do. The two files are indistinguishable in a
+    file picker; the only difference is the tab name.
+
+    Tested against plain lists of sheet names rather than real workbooks.
+    The first version of this test built them with openpyxl and died twice
+    on the Mac that gates every deploy — no Workbook.active, then no
+    Workbook.worksheets — which tested that machine's openpyxl rather than
+    this decision. Same lesson as the 3.9 union-syntax break on 06.09.26,
+    learned one layer up: the machine that writes a fix is not the machine
+    that ships it, so a test should depend on as little of either as it
+    can."""
+    from src.data_loader import resolve_sheet_name
+
+    check("the wanted tab is used when it is there",
+          resolve_sheet_name(["Stock Parcel", "Notes"], "Stock Parcel", "m.xlsx"),
+          "Stock Parcel")
+    check("one sheet is not ambiguous, whatever it is called",
+          resolve_sheet_name(["Sheet1"], "Stock Parcel", "working copy.xlsx"), "Sheet1")
+    check("even when it is named something odd",
+          resolve_sheet_name(["BROOK ST QTN"], "Stock Parcel", "SOH.xlsx"), "BROOK ST QTN")
+
+    try:
+        resolve_sheet_name(["Sheet1", "Notes"], "Stock Parcel", "Brook St working.xlsx")
+        check("a real mismatch raises", False, True)
+    except ValueError as e:
+        msg = str(e)
+        check("it names the file", "Brook St working.xlsx" in msg, True)
+        check("it names the tab it wanted", "'Stock Parcel'" in msg, True)
+        check("it names the tabs it found", "'Sheet1', 'Notes'" in msg, True)
+        check("and it says where to look", "tab name at the bottom" in msg, True)
+    except KeyError:
+        check("a mismatch is not a bare KeyError any more", False, True)
+
+    # Only the file's name reaches the message, never the whole path.
+    try:
+        resolve_sheet_name(["A", "B"], "Stock Parcel",
+                           "/Users/spackard/Downloads/Brook St working.xlsx")
+        check("raises on a full path too", False, True)
+    except ValueError as e:
+        check("the message carries the name, not the path",
+              "/Users/spackard" not in str(e), True)
+
+
+def test_the_preflight_names_what_will_not_list():
+    """Everything the 14.09.26 batches lost, findable in seconds instead of
+    twenty minutes: 8 listings to a blank size, 2 to a bare number, and
+    BRK02-001-026 held out of three runs for one empty RRP cell.
+
+    This pins the detection rules. None of them stop a run — a batch where
+    one row is short still lists the other forty."""
+    import re as _re
+    from src.data_loader import Product
+
+    def blank_size(p):
+        return not str(p.meas("Size") or "").strip()
+
+    def bare_number(p):
+        return bool(_re.fullmatch(r"\d+(?:\.\d+)?", str(p.meas("Size") or "").strip()))
+
+    def no_rrp(p):
+        return not (p.m("Rounded RRP") or 0)
+
+    cases = [
+        ("QTN02-002-156", {"Rounded RRP": 900}, {"Size": ""},       True,  False, False),
+        ("QTN02-002-196", {"Rounded RRP": 900}, {"Size": "   "},    True,  False, False),
+        ("BRK02-001-030", {"Rounded RRP": 1100}, {"Size": "38"},    False, True,  False),
+        ("QTN02-002-454", {"Rounded RRP": 700}, {"Size": "7.5"},    False, True,  False),
+        ("QTN02-001-604", {"Rounded RRP": 700}, {"Size": "EU 38"},  False, False, False),
+        ("QTN02-001-232", {"Rounded RRP": 995}, {"Size": "UK XS"},  False, False, False),
+        ("BRK02-001-048", {"Rounded RRP": 440}, {"Size": "L"},      False, False, False),
+        ("BRK02-001-026", {"Rounded RRP": None}, {"Size": "38"},    False, True,  True),
+        ("BRK02-001-023", {"Rounded RRP": 1100}, {"Size": "0"},     False, True,  False),
+    ]
+    for sku, master, meas, want_blank, want_bare, want_norrp in cases:
+        p = Product(sku, master, meas)
+        check(f"{sku} blank size", blank_size(p), want_blank)
+        check(f"{sku} bare number", bare_number(p), want_bare)
+        check(f"{sku} no RRP", no_rrp(p), want_norrp)
+
+    # A marked size is never flagged, which is the whole point of the
+    # 05.09.26 intake rule.
+    for good in ("EU 38", "UK 7.5", "US 9", "M", "XS", "2.5-3.5"):
+        check(f"{good!r} is not a bare number",
+              bare_number(Product("T", {}, {"Size": good})), False)
+
+
 def test_a_missing_rrp_blocks_the_listing_and_the_fallback_stays_off():
     """Sammy, 14.09.26, twice in one day.
 

@@ -13,9 +13,10 @@ Categories/Aspects/BusinessPolicy sheets to preserve.
 """
 from __future__ import annotations
 
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -79,9 +80,21 @@ def _noop(msg: str, frac: float | None = None) -> None:
     pass
 
 
-def default_output_filename(today: date | None = None) -> str:
-    """e.g. 'Ebay-Upload-25.08.26.csv'."""
-    return f"Ebay-Upload-{(today or date.today()):%d.%m.%y}.csv"
+def default_output_filename(now=None) -> str:
+    """e.g. 'Ebay-Upload-14.09.26-1540.csv'.
+
+    The time is in there because it was not, and two runs on the same day
+    silently overwrote each other. 14.09.26 had five runs: the QTN02
+    re-run, the Brook St batch, and three attempts at BRK02-001-026. Only
+    the last one's file survived, and the NEEDS ATTENTION file and checks
+    report that go beside it were overwritten too — so the record of what
+    was held back went with them.
+
+    Minutes, not seconds: two runs inside the same minute is not a thing
+    that happens here, and a filename someone has to read aloud is worth
+    keeping short."""
+    stamp = now or datetime.now()
+    return f"Ebay-Upload-{stamp:%d.%m.%y-%H%M}.csv"
 
 
 def _per_template_output_path(base_output_path: str | Path, template_path: str | Path, index: int, total: int) -> Path:
@@ -267,13 +280,57 @@ def run(
     # Master File can be fixed before the expensive part happens rather
     # than after it. Deliberately not fatal: a batch where one row is
     # missing an RRP should still list the other forty.
+    # 2.4 — what did I just read? 14.09.26: the working copy of a sheet and
+    # the master built from it are indistinguishable in a file picker, and
+    # the wrong one was uploaded twice. Counts that look wrong are obvious
+    # in one second; a wrong file is not.
+    departments = sorted({str(p.m("Category") or "?") for p in products})
+    with_rrp = sum(1 for p in products if (p.m("Rounded RRP") or 0))
+    on_progress(
+        f"Read {len(products)} product(s): {with_rrp} with an RRP, "
+        f"{len(products) - with_rrp} without. Departments: {', '.join(departments)}.", 0.05)
+
+    # The pre-flight. Everything below is checked BEFORE a single AI call,
+    # because until 14.09.26 the only way to learn any of it was to wait
+    # out the whole run and read the held-back list. That day: 8 listings
+    # lost to a blank size, 2 to a bare number, and BRK02-001-026 held out
+    # of three separate runs for one empty RRP cell.
+    #
+    # None of these stop the run. A batch where one row is short should
+    # still list the other forty.
+    warnings = []
+
     no_rrp = [p.sku for p in products if not (p.m("Rounded RRP") or 0)]
     if no_rrp:
+        warnings.append(
+            f"{len(no_rrp)} product(s) have NO RRP in the Master File, so they will price "
+            f"at £0 and be held out of the upload file: {', '.join(no_rrp)}")
+
+    # A blank Size is always fatal — the Pictures & Measurements file is the
+    # only source, the Master File is never a fallback (it is not verified
+    # against the physical item), so there is nothing to fall back to.
+    no_size = [p.sku for p in products if not str(p.meas("Size") or "").strip()]
+    if no_size:
+        warnings.append(
+            f"{len(no_size)} product(s) have NO SIZE in the Orbitvu file and cannot list. "
+            f"The Master File size is never used as a fallback: {', '.join(no_size)}")
+
+    # A bare number is not always wrong — a bare shoe number is read as UK
+    # by Sammy's 04.09.26 rule — but in any clothing category that takes
+    # EU/FR/IT it is refused, because an IT 38 and an FR 38 are different
+    # garments. Worth naming, not worth blocking.
+    bare = [p.sku for p in products
+            if re.fullmatch(r"\d+(?:\.\d+)?", str(p.meas("Size") or "").strip())]
+    if bare:
+        warnings.append(
+            f"{len(bare)} product(s) have a BARE NUMBER size with no scale marker. Fine for "
+            f"shoes, refused in any clothing category that takes EU/FR/IT sizes. Record it "
+            f"as e.g. 'EU 38' if these are garments: {', '.join(bare)}")
+
+    if warnings:
         on_progress(
-            f"HEADS UP before the slow part: {len(no_rrp)} product(s) have no RRP in the "
-            f"Master File, so they will price at £0 and be held out of the upload file. "
-            f"Stop now, add the RRP, and re-run if you want them listed: "
-            f"{', '.join(no_rrp)}", 0.05)
+            "HEADS UP before the slow part — fix these now and re-run, or let it go and "
+            "these products will be missing from the file:\n  " + "\n  ".join(warnings), 0.05)
 
     if template_paths:
         label = "department templates" if used_default_departments else "eBay template(s)"

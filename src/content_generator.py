@@ -90,6 +90,8 @@ def _sizing_sources() -> list:
         aspect_matching.scrub_internal_references, _inspection_flag,
         aspect_matching.scrub_generic_trademarks,
         aspect_matching.match_type_from_title,
+        aspect_matching.match_materials,
+        aspect_matching._material_candidates,
         aspect_matching.match_shoe_size_uk, aspect_matching.match_shoe_size_eu,
         aspect_matching.match_size, aspect_matching.size_display,
         aspect_matching.match_colour, aspect_matching._marker_first,
@@ -147,6 +149,8 @@ def _sizing_fingerprint() -> str:
     parts.append(aspect_matching._GENERIC_TRADEMARK_RE.pattern)
     parts.append(repr(aspect_matching._TYPE_TITLE_PATTERNS))
     parts.append(repr(aspect_matching._TYPE_TITLE_FALLBACKS))
+    parts.append(repr(sorted(aspect_matching.MATERIAL_SYNONYMS.items())))
+    parts.append(repr(sorted(aspect_matching.MATERIAL_IGNORED)))
     for pattern in (
         aspect_matching._TITLE_GENDER_RE,
         aspect_matching._TITLE_SIZE_RE,
@@ -180,7 +184,8 @@ NEVER_FILL_ASPECTS = {
 }
 
 # Aspects resolved deterministically in Python — never asked of the AI.
-DETERMINISTIC_ASPECTS = {"C:Brand", "C:Department", "C:Country of Origin", "C:MPN", "C:Type"}
+DETERMINISTIC_ASPECTS = {"C:Brand", "C:Department", "C:Country of Origin", "C:MPN",
+                         "C:Type", "C:Material"}
 
 # Physical garment measurements (inches) — always taken from the verified
 # Pictures & Measurements file, same trust reasoning as Size/Colour/Material
@@ -304,6 +309,22 @@ def _resolve_deterministic(name: str, product: Product, spec: ebay_template.Aspe
         return aspect_matching.match_country(m.get("Country of Origin"), spec.values)
     if name == "C:MPN":
         return "Does Not Apply"
+    if name == "C:Material":
+        # 14.09.26. Preferred in every clothing category, multi-value, and
+        # blank on every listing this account has ever produced — 51 to 98
+        # permitted values put it over classify_aspects' large-list
+        # threshold, so it was skipped rather than asked.
+        #
+        # It never needed the model. The composition is recorded per
+        # garment by a person holding it, which beats anything inferred
+        # from a photograph. Both sources are read and unioned: the
+        # Orbitvu export truncates its Material column at 50 characters
+        # (QTN02-002-454's reads "...Lambskin 100 Lambsk"), so the Master
+        # File's Composition carries fibres the measurements file lost,
+        # and neither is a guess.
+        materials = aspect_matching.match_materials(
+            [meas.get("Material"), m.get("Composition")], spec.values)
+        return "|".join(materials) if materials else None
     if name == "C:Type":
         # Confirmed 04.09.26: Type is Master File's SubCat2 column (like
         # Colour/Material/Brand/Gender, entered at intake and carried onto
@@ -524,7 +545,20 @@ def classify_aspects(
     skipped: dict[str, ebay_template.AspectSpec] = {}
 
     for name, spec in aspects.items():
-        if name in DETERMINISTIC_ASPECTS or name in MEASUREMENT_ASPECTS or _is_size_aspect(name):
+        # C:Material is resolved from the composition (see
+        # _resolve_deterministic), and that value always wins. But a
+        # composition can name nothing eBay recognises — a homeware plate,
+        # a bag whose "composition" is "Methyl Methacrylate" — and
+        # C:Material is REQUIRED in 24 of this account's categories,
+        # including Nightwear and Men's Bags. Leaving those to the parse
+        # alone would empty a Required field and hold the row out of the
+        # upload file. So when it is Required it ALSO goes to the AI as a
+        # backstop; the deterministic value overwrites it whenever the
+        # parse found something.
+        deterministic = name in DETERMINISTIC_ASPECTS
+        if deterministic and name == "C:Material" and spec.level == "REQUIRED":
+            deterministic = False
+        if deterministic or name in MEASUREMENT_ASPECTS or _is_size_aspect(name):
             continue
         if name in NEVER_FILL_ASPECTS:
             skipped[name] = spec

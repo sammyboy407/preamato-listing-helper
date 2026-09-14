@@ -1512,6 +1512,103 @@ def test_a_stringified_item_specifics_does_not_crash_the_product():
     check("the old `or {}` case still works", coerce({}), {})
 
 
+def test_the_material_is_read_off_the_composition():
+    """14.09.26. C:Material is Preferred in every clothing category, eBay
+    allows several values at once, and it was blank on EVERY listing this
+    account had ever produced. Not a bug: classify_aspects skips any
+    non-Required closed list over 40 values, and C:Material has 51 to 98
+    depending on category, so it never reached the model.
+
+    It never needed to. The composition is recorded per garment by a
+    person holding it, which beats anything inferred from a photograph.
+    Every string below is a real one from the QTN02 or Brook St parcels."""
+    values = ["100% Cotton", "Acetate", "Cotton", "Cupro", "Elastane", "Leather",
+              "Linen", "Polyamide", "Polyester", "Silk", "Suede", "Viscose", "Wool"]
+
+    real = {
+        # Brook St, verbatim.
+        "SHELL 94% VISCOSE 6% ELASTANE": ["Viscose", "Elastane"],
+        "M: 71% ACETATE 29% VISCOSE L: 73% ACETATE 27% SILK": ["Acetate", "Viscose", "Silk"],
+        "Linen/Flax 55 Cotton 100 Silk 45": ["Linen", "Cotton", "Silk"],
+        "OUTER SHELL: 100% SILK": ["Silk"],
+        "Polyamide 80 Spandex/Elastane 20 viscose 100": ["Polyamide", "Elastane", "Viscose"],
+        "Silk 77 viscose 100 Elastane 7 Polyamide 16": ["Silk", "Viscose", "Elastane", "Polyamide"],
+        "Calf Suede 34 Fabric 100 Recycled Polyester 33 Fab": ["Suede", "Polyester"],
+        "Calf Leather 100 Calf Leather 100": ["Leather"],
+        # Order is the order written, which is the order on the label, so
+        # the fibre most of the garment is made of comes first.
+        "Cotton 60 Silk 40": ["Cotton", "Silk"],
+    }
+    for raw, expected in real.items():
+        check(f"{raw[:44]!r}", am.match_materials(raw, values), expected)
+
+    # eBay's own "100% X" is a real, separate, more-specific value and
+    # buyers filter on it — but only where the category offers it.
+    check("one fibre at 100% takes the 100% value",
+          am.match_materials("100% COTTON", values), ["100% Cotton"])
+    check("and 'Organic Cotton 100' is the same thing said differently",
+          am.match_materials("Organic Cotton 100", values), ["100% Cotton"])
+    check("but never invented for a category without it",
+          am.match_materials("100% SILK", ["Cotton", "Silk"]), ["Silk"])
+    check("and never when more than one fibre is named",
+          am.match_materials("Cotton 100 Silk 100", values), ["Cotton", "Silk"])
+
+    # Nothing recognisable is left blank rather than forced onto a wrong
+    # fibre. C:Material is Preferred, so a blank costs nothing and a wrong
+    # fibre is a returns problem.
+    check("the supplier's own placeholder names no fibre",
+          am.match_materials("Other fibres 100 Other fibres 100", values), [])
+    check("a weave is not a fibre",
+          am.match_materials("MOUSSELINE", values), [])
+    check("nor is the resin a bag is moulded from",
+          am.match_materials("Methyl Methacrylate 100", values), [])
+    check("nor is 'Fabric'", am.match_materials("Fabric 100 Fabric 100", values), [])
+    check("no composition, no guess", am.match_materials("", values), [])
+    check("none, no guess", am.match_materials(None, values), [])
+    check("no candidate values, no guess", am.match_materials("100% COTTON", []), [])
+
+    # The strictness that makes the rest safe. These are short words from a
+    # closed vocabulary and a loose threshold produces confident nonsense —
+    # the same reasoning as match_brand's high cutoff.
+    check("Cupro is never matched to Cotton",
+          am.match_materials("Cupro 100", ["Cotton", "Silk"]), [])
+    check("and a fibre the category doesn't offer is simply dropped",
+          am.match_materials("SHELL 94% VISCOSE 6% ELASTANE", ["Cotton", "Elastane"]),
+          ["Elastane"])
+
+    # Both sources are read and unioned: the Orbitvu export truncates its
+    # Material column at 50 characters, which is how QTN02-002-454 ended
+    # up reading "...Lambskin 100 Lambsk".
+    check("the truncated export and the full composition are unioned",
+          am.match_materials(["viscose 37 Cupro 63 Lambskin 100 Lambsk",
+                              "viscose 37 Cupro 63 Lambskin 100 Leather 100"], values),
+          ["Viscose", "Cupro", "Leather"])
+
+    # End to end, through the real template, on the real SKU.
+    from src import content_generator as cg, ebay_template as et
+    from src.data_loader import Product
+    spec = et.AspectSpec(name="C:Material", level="PREFERRED", multi=True, values=values)
+    magda = Product("BRK02-001-026",
+                    {"Composition": "SHELL 94% VISCOSE 6% ELASTANE"},
+                    {"Material": "SHELL 94% VISCOSE 6% ELASTANE"})
+    check("pipe-separated for eBay's bulk CSV",
+          cg._resolve_deterministic("C:Material", magda, spec), "Viscose|Elastane")
+    blank = Product("X", {"Composition": ""}, {"Material": "Other fibres 100"})
+    check("nothing found leaves it to the AI rather than writing an empty cell",
+          cg._resolve_deterministic("C:Material", blank, spec), None)
+
+    # C:Material is REQUIRED in 24 of this account's categories (Nightwear,
+    # Men's Bags, most homeware furniture). A composition that names no
+    # fibre must not empty a Required field and hold the row out, so there
+    # it also goes to the AI as a backstop.
+    t = et.load_json_template("data/templates/womenswear_clothing.json")
+    _, _, multi_preferred, skipped_preferred = cg.classify_aspects("53159", t)
+    check("Preferred: the composition is the only source",
+          "C:Material" in multi_preferred or "C:Material" in skipped_preferred, False)
+    _, _, multi_required, _ = cg.classify_aspects("63855", t)
+    check("Required: the AI backs it up", "C:Material" in multi_required, True)
+
+
 def test_the_title_says_who_the_item_is_for():
     """Sammy, 06.09.26: "we need to add Mens Womens after each brand in the
     title, this is optimal for ebay search results".

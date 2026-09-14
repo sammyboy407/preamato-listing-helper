@@ -33,9 +33,53 @@ def _as_list(paths: str | Path | list) -> list:
     return paths if isinstance(paths, list) else [paths]
 
 
+def resolve_sheet_name(found: list, wanted: str, path) -> str:
+    """Which sheet to read, given the sheets a workbook actually has.
+
+    14.09.26. Uploading the working copy of a sheet instead of the master
+    built from it produced a raw Python traceback — "KeyError: 'Worksheet
+    Stock Parcel does not exist.'" — which says nothing about what to do
+    instead. It happened twice in one afternoon, because the two files are
+    indistinguishable in a file picker: the only difference is the tab
+    name.
+
+    A workbook with exactly one sheet is not ambiguous, so it is used
+    whatever that sheet is called. Anything else names the file, the tab
+    it wanted, and the tabs it found.
+
+    Split out as its own function over plain strings deliberately. The
+    first test for it built workbooks with openpyxl and died twice on the
+    Mac that gates every deploy — no Workbook.active, then no
+    Workbook.worksheets — testing that machine's openpyxl rather than this
+    decision. The decision is the part that can be wrong.
+    """
+    if wanted in found:
+        return wanted
+    if len(found) == 1:
+        return found[0]
+    raise ValueError(
+        f"{Path(path).name} has no sheet called {wanted!r}. Its sheets are: "
+        f"{', '.join(repr(n) for n in found)}. The Stock Data File is the one "
+        f"with a {wanted!r} tab — check the tab name at the bottom of the "
+        f"workbook before uploading."
+    )
+
+
 def load_master_file(path: str | Path, sheet_name: str = "Stock Parcel") -> dict[str, dict[str, Any]]:
     """Returns {SKU: row_dict} for every row in one master file's 'Stock Parcel' sheet."""
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    # 14.09.26. Uploading the wrong workbook produced a raw Python
+    # traceback — "KeyError: 'Worksheet Stock Parcel does not exist.'" —
+    # which says nothing about which file to use instead. It happened
+    # twice in one afternoon, both times because the working copy of a
+    # sheet (tab: "Sheet1") looks identical in a file picker to the master
+    # built from it (tab: "Stock Parcel").
+    #
+    # A workbook with exactly one sheet is not ambiguous, so use it. Any
+    # other mismatch names the file, the tab it wanted, and the tabs it
+    # actually found.
+    found = list(getattr(wb, "sheetnames", None) or wb.get_sheet_names())
+    sheet_name = resolve_sheet_name(found, sheet_name, path)
     ws = wb[sheet_name]
     rows = ws.iter_rows(values_only=True)
     headers = [h.strip() if isinstance(h, str) else h for h in next(rows)]
