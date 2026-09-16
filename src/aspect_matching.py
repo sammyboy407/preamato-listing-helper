@@ -183,11 +183,69 @@ def match_brand(raw: str | None, valid_values: list[str] | None) -> str:
     return matched or str(raw).strip()
 
 
+# Sizes written out in words. eBay's clothing Size lists carry only the
+# abbreviated forms, and it spells the doubles 2XL/2XS, never XXL/XXS
+# (confirmed 15.09.26 against the live picklists).
+#
+# 16.09.26: 40556-005-012 (MIBHV) was recorded as "LARGE" and refused with
+# 21920468 against a list reading 3XS, 2XS, XS, XS/S, S, S/M, M, M/L, L...
+# Sammy's rule: LARGE, SMALL and anything like them convert.
+#
+# Keys are in the form _size_alias_key produces: lowercased, with spaces,
+# hyphens, dots and underscores collapsed to one space, so "X-LARGE",
+# "X LARGE" and "x  large" all land on the same entry.
 SIZE_ALIASES = {
     "os": "One Size",
     "o/s": "One Size",
+    "o s": "One Size",
     "one size": "One Size",
+    "onesize": "One Size",
+    "free size": "One Size",
+    "xxxs": "3XS",
+    "xxx small": "3XS",
+    "triple extra small": "3XS",
+    "xxs": "2XS",
+    "xx small": "2XS",
+    "double extra small": "2XS",
+    "extra extra small": "2XS",
+    "x small": "XS",
+    "xsmall": "XS",
+    "extra small": "XS",
+    "sm": "S",
+    "small": "S",
+    "med": "M",
+    "medium": "M",
+    "lg": "L",
+    "lge": "L",
+    "large": "L",
+    "x large": "XL",
+    "xlarge": "XL",
+    "extra large": "XL",
+    "xxl": "2XL",
+    "xx large": "2XL",
+    "double extra large": "2XL",
+    "extra extra large": "2XL",
+    "xxxl": "3XL",
+    "xxx large": "3XL",
+    "xxxxl": "4XL",
+    "xxxxxl": "5XL",
+    "xxxxxxl": "6XL",
+    "extra small/small": "XS/S",
+    "small/medium": "S/M",
+    "medium/large": "M/L",
+    "large/extra large": "L/XL",
 }
+
+
+_SIZE_ALIAS_SEPARATORS = re.compile(r"[\s._\-]+")
+
+
+def _size_alias_key(raw) -> str:
+    """The form SIZE_ALIASES is keyed on. Separators collapse to one space,
+    but the slash is KEPT: "S/M" is a size pair and "SM" is a small, and a
+    normaliser that strips all punctuation would land both on "sm" and turn
+    a medium-large garment into a small one."""
+    return _SIZE_ALIAS_SEPARATORS.sub(" ", str(raw).strip().lower()).strip()
 
 
 # The account's own colour vocabulary, which is a family of colours rather
@@ -295,7 +353,7 @@ def match_size(raw: str | None, valid_values: list[str] | None) -> str | None:
     if not raw or not valid_values:
         return None
     raw = str(raw).strip()
-    alias = SIZE_ALIASES.get(raw.lower())
+    alias = SIZE_ALIASES.get(_size_alias_key(raw))
     if alias:
         exact = fuzzy_match(alias, valid_values, cutoff=0.9)
         if exact:

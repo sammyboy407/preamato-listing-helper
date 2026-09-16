@@ -2373,6 +2373,62 @@ def test_the_title_carries_the_colour_the_listing_carries():
     check("end-to-end: and C:Colour was not asked of the model",
           any('"C:Colour"' in b for b in briefs), False)
 
+
+
+# --- word sizes (16.09.26) -------------------------------------------------
+# 40556-005-012 (MIBHV) was recorded as "LARGE" and refused with 21920468.
+# eBay's lists carry only the abbreviated forms, and spell the doubles
+# 2XL/2XS rather than XXL/XXS.
+
+_WOMENS_SIZE_LIST = [
+    "3XS", "2XS", "XS", "XS/S", "S", "S/M", "M", "M/L", "L", "L/XL", "XL",
+    "2XL", "3XL", "4XL", "5XL", "6XL", "One Size",
+    "UK 8", "UK 10", "UK 12", "EU 36", "EU 38", "EU 40", "IT 42",
+]
+
+
+def test_word_sizes_become_ebay_letters():
+    for raw, want in [
+        ("LARGE", "L"), ("large", "L"), (" Large ", "L"), ("Lge", "L"),
+        ("SMALL", "S"), ("Small", "S"), ("SM", "S"),
+        ("MEDIUM", "M"), ("Med", "M"),
+        ("X-LARGE", "XL"), ("X LARGE", "XL"), ("XLARGE", "XL"),
+        ("EXTRA LARGE", "XL"),
+        ("XXL", "2XL"), ("XX-LARGE", "2XL"), ("EXTRA EXTRA LARGE", "2XL"),
+        ("X-SMALL", "XS"), ("EXTRA SMALL", "XS"),
+        ("XXS", "2XS"), ("XXXL", "3XL"),
+        ("OS", "One Size"), ("One Size", "One Size"),
+        ("SMALL/MEDIUM", "S/M"), ("MEDIUM/LARGE", "M/L"),
+    ]:
+        got = am.match_size(raw, _WOMENS_SIZE_LIST)
+        assert got == want, f"{raw!r} -> {got!r}, wanted {want!r}"
+
+
+def test_sm_is_a_small_and_s_slash_m_is_a_pair():
+    # A normaliser that stripped all punctuation would land both on "sm"
+    # and quietly turn a medium-large garment into a small one.
+    assert am.match_size("SM", _WOMENS_SIZE_LIST) == "S"
+    assert am.match_size("S/M", _WOMENS_SIZE_LIST) == "S/M"
+
+
+def test_numeric_and_marked_sizes_are_not_touched_by_the_alias_table():
+    for raw in ["UK 10", "EU 36", "IT 42", "8", "10"]:
+        assert am._size_alias_key(raw) not in am.SIZE_ALIASES
+
+
+def test_an_unknown_word_size_is_refused_not_guessed():
+    # Still reaches the refuse-and-name-it path from fix 31 rather than
+    # being mangled into the nearest letter.
+    assert am.match_size("ONE SIZE FITS ALL", ["S", "M", "L"]) is None
+
+
+def test_the_word_size_table_is_in_the_cache_fingerprint():
+    # SIZE_ALIASES is hashed already; _size_alias_key is a new function and
+    # a stale cached size is indistinguishable from a fresh one.
+    from src import content_generator
+    assert am._size_alias_key in content_generator._sizing_sources()
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
