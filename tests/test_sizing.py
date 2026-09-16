@@ -2595,6 +2595,50 @@ def test_a_house_number_written_beside_its_letter():
     assert am.resolve_brand_size("3/LARGE", "SOME LABEL", "MEN") == "L"
 
 
+
+# --- luggage sizes (16.09.26) ----------------------------------------------
+# A suitcase's size is a capacity class, not a fitting. Sammy: "maybe cabin
+# or carry on - S,M or large keep it simple."
+
+
+def test_luggage_sizes_are_capacity_words_not_letters():
+    for raw, want in [("S", "Small"), ("M", "Medium"), ("L", "Large"),
+                      ("LARGE", "Large"), ("Medium", "Medium"),
+                      ("CABIN", "Cabin"), ("Carry On", "Cabin"),
+                      ("carry-on", "Cabin"), ("Hand Luggage", "Cabin"),
+                      ("CHECK-IN", "Large"), ("XL", "Large")]:
+        assert am.luggage_size(raw) == want, f"{raw!r} -> {am.luggage_size(raw)!r}"
+
+
+def test_the_clothing_path_would_get_luggage_wrong():
+    # SIZE_ALIASES turns LARGE into L, which is right on a jumper and
+    # meaningless on a suitcase. The two paths must not be shared.
+    assert am.SIZE_ALIASES[am._size_alias_key("LARGE")] == "L"
+    assert am.luggage_size("LARGE") == "Large"
+
+
+def test_an_unrecorded_luggage_size_is_not_invented():
+    for raw in ["OS", "42", "", None, "Not Specified"]:
+        assert am.luggage_size(raw) is None
+
+
+def test_homewear_counts_as_luggage():
+    # The business's own word for luggage, and it reads as homeware to
+    # everything downstream — two Floyd check-in cases were filed as Men's
+    # Nightwear because of it.
+    assert am.is_luggage("Homewear")
+    assert am.is_luggage("Luggage")
+    assert not am.is_luggage("Bags")
+    assert not am.is_luggage("Knitwear")
+
+
+def test_the_luggage_tables_are_in_the_cache_fingerprint():
+    from src import content_generator
+    sources = content_generator._sizing_sources()
+    for fn in (am.is_luggage, am.luggage_size):
+        assert fn in sources
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

@@ -578,6 +578,49 @@ _HOUSE_NUMBER_WITH_WORD_RE = re.compile(
     r"^\s*\d{1,3}\s*[-/(,]\s*([A-Za-z][A-Za-z /-]*?)\s*\)?\s*$")
 
 
+# Luggage sizes are their own vocabulary, and a small one on purpose.
+#
+# 16.09.26, Sammy: "i think you need size for luggage - maybe cabin or carry
+# on - S,M or large keep it simple."
+#
+# A suitcase's size is a capacity class, not a fitting, so none of the
+# clothing machinery applies: SIZE_ALIASES would turn "LARGE" into "L",
+# which is right on a jumper and meaningless on a case, and the brand scale
+# tables have nothing to say about luggage at all. Four values, spelled the
+# way a buyer says them.
+LUGGAGE_SUBCATS = {"LUGGAGE", "HOMEWEAR", "TRAVEL", "SUITCASES"}
+
+LUGGAGE_SIZES = {
+    "CABIN": "Cabin", "CARRY ON": "Cabin", "CARRYON": "Cabin",
+    "HAND LUGGAGE": "Cabin", "HAND": "Cabin", "XS": "Cabin",
+    "S": "Small", "SMALL": "Small",
+    "M": "Medium", "MEDIUM": "Medium", "MED": "Medium",
+    "L": "Large", "LARGE": "Large", "LG": "Large",
+    "CHECK IN": "Large", "CHECKIN": "Large", "CHECK-IN": "Large",
+    "XL": "Large", "EXTRA LARGE": "Large",
+}
+
+
+def is_luggage(subcat=None, category=None) -> bool:
+    """Whether this product is a piece of luggage.
+
+    "Homewear" is in here because it is the business's own word for luggage
+    and reads as homeware to everything downstream -- which is how two Floyd
+    check-in cases were filed as Men's Nightwear on 16.09.26."""
+    for value in (subcat, category):
+        if _normalise_brand(value).replace("-", " ") in LUGGAGE_SUBCATS:
+            return True
+    return False
+
+
+def luggage_size(raw) -> str | None:
+    """Cabin / Small / Medium / Large, or None where the value says none of
+    them. None rather than a guess: a capacity nobody recorded is better
+    left off the listing than invented."""
+    key = _size_alias_key(raw).upper().replace("-", " ")
+    return LUGGAGE_SIZES.get(key)
+
+
 def _brand_table_key(brand, table):
     """The table entry for this brand. Matched on the whole name first, then
     on the longest entry the name STARTS with, because the Master File
