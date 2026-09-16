@@ -574,15 +574,35 @@ BRAND_SIZE_SYSTEM = {
 CONTINENTAL_SIZE_FLOOR = 30
 
 _BARE_NUMBER_SIZE_RE = re.compile(r"^\s*(\d{1,3})\s*$")
+_HOUSE_NUMBER_WITH_WORD_RE = re.compile(
+    r"^\s*\d{1,3}\s*[-/(,]\s*([A-Za-z][A-Za-z /-]*?)\s*\)?\s*$")
+
+
+def _brand_table_key(brand, table):
+    """The table entry for this brand. Matched on the whole name first, then
+    on the longest entry the name STARTS with, because the Master File
+    appends a department to some labels: the Issey Miyake pleats line is
+    recorded as "ISSEY MIYAKE HOMME PLISSE MEN". An exact-only lookup
+    silently missed it and dropped the listing (QTN02-001-744, 16.09.26).
+    Longest-first so "ISSEY MIYAKE HOMME PLISSE" beats "ISSEY MIYAKE"."""
+    name = _normalise_brand(brand)
+    if not name:
+        return None
+    if name in table:
+        return name
+    for key in sorted(table, key=len, reverse=True):
+        if name.startswith(key) and name[len(key):len(key) + 1] in ("", " "):
+            return key
+    return None
 
 
 def brand_size_scale(brand, gender):
     """The house scale for this brand and gender, or None."""
-    scales = BRAND_SIZE_SCALES.get(_normalise_brand(brand))
-    if not scales:
+    key = _brand_table_key(brand, BRAND_SIZE_SCALES)
+    if not key:
         return None
-    g = _normalise_brand(gender)
-    return scales.get(g) or scales.get("*")
+    scales = BRAND_SIZE_SCALES[key]
+    return scales.get(_normalise_brand(gender)) or scales.get("*")
 
 
 def resolve_brand_size(raw, brand=None, gender=None) -> str:
@@ -592,6 +612,13 @@ def resolve_brand_size(raw, brand=None, gender=None) -> str:
     text = " ".join(str(raw or "").strip().split())
     m = _BARE_NUMBER_SIZE_RE.match(text)
     if not m:
+        # "01 - SMALL", "2 (M)" — the house number with its letter written
+        # beside it. The letter is the reliable half and needs no table at
+        # all. QTN02-002-625 was recorded this way and dropped silently.
+        beside = _HOUSE_NUMBER_WITH_WORD_RE.match(text)
+        if beside:
+            word = beside.group(1).strip()
+            return SIZE_ALIASES.get(_size_alias_key(word), word.upper())
         return text
     number = m.group(1)
     scale = brand_size_scale(brand, gender)
@@ -599,9 +626,9 @@ def resolve_brand_size(raw, brand=None, gender=None) -> str:
     # looked up before any int() normalisation flattens them together.
     if scale and number in scale:
         return scale[number]
-    system = BRAND_SIZE_SYSTEM.get(_normalise_brand(brand))
-    if system and int(number) >= CONTINENTAL_SIZE_FLOOR:
-        return f"{system} {number}"
+    key = _brand_table_key(brand, BRAND_SIZE_SYSTEM)
+    if key and int(number) >= CONTINENTAL_SIZE_FLOOR:
+        return f"{BRAND_SIZE_SYSTEM[key]} {number}"
     return text
 
 

@@ -2574,6 +2574,27 @@ def test_the_brand_scales_are_in_the_cache_fingerprint():
         assert fn in sources
 
 
+
+def test_a_brand_with_a_department_appended_still_matches():
+    # The Master File records the pleats line as "ISSEY MIYAKE HOMME PLISSE
+    # MEN". An exact-only lookup missed it and dropped QTN02-001-744.
+    assert am.resolve_brand_size("4", "ISSEY MIYAKE HOMME PLISSE MEN", "MEN") == "XL"
+    assert am.resolve_brand_size("40", "ATTICO WOMEN", "WOMEN") == "IT 40"
+    # Longest entry wins, so the pleats scale is not shadowed by the plain one.
+    assert am._brand_table_key("ISSEY MIYAKE HOMME PLISSE MEN",
+                               am.BRAND_SIZE_SCALES) == "ISSEY MIYAKE HOMME PLISSE"
+    # And a longer unrelated brand is not swallowed by a shorter entry.
+    assert am._brand_table_key("MONCLERIA", am.BRAND_SIZE_SCALES) is None
+
+
+def test_a_house_number_written_beside_its_letter():
+    # QTN02-002-625 was recorded as "01 - SMALL" and dropped silently. The
+    # letter is the reliable half and needs no brand table at all.
+    assert am.resolve_brand_size("01 - SMALL", "THOM BROWNE", "MEN") == "S"
+    assert am.resolve_brand_size("2 (M)", "MONCLER", "MEN") == "M"
+    assert am.resolve_brand_size("3/LARGE", "SOME LABEL", "MEN") == "L"
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

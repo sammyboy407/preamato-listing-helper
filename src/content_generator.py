@@ -95,6 +95,7 @@ def _sizing_sources() -> list:
         aspect_matching.match_shoe_size_uk, aspect_matching.match_shoe_size_eu,
         aspect_matching.match_size, aspect_matching._size_alias_key,
         aspect_matching.resolve_brand_size, aspect_matching.brand_size_scale,
+        aspect_matching._brand_table_key,
         aspect_matching.enforce_condition, aspect_matching.condition_from_notes,
         aspect_matching.notes_say_preloved, aspect_matching._first_offered,
         _condition_rubric,
@@ -137,6 +138,7 @@ def _sizing_fingerprint() -> str:
                              for b, s in aspect_matching.BRAND_SIZE_SCALES.items())))
     parts.append(repr(sorted(aspect_matching.BRAND_SIZE_SYSTEM.items())))
     parts.append(repr(aspect_matching.CONTINENTAL_SIZE_FLOOR))
+    parts.append(aspect_matching._HOUSE_NUMBER_WITH_WORD_RE.pattern)
     parts.append(repr(sorted(aspect_matching.SIZE_ALIASES.items())))
     parts.append(repr(sorted(aspect_matching.COLOUR_FAMILY_ALIASES.items())))
     parts.append(repr(aspect_matching._SIZE_MARKERS))
