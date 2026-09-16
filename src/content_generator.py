@@ -94,6 +94,9 @@ def _sizing_sources() -> list:
         aspect_matching._material_candidates,
         aspect_matching.match_shoe_size_uk, aspect_matching.match_shoe_size_eu,
         aspect_matching.match_size, aspect_matching._size_alias_key,
+        aspect_matching.enforce_condition, aspect_matching.condition_from_notes,
+        aspect_matching.notes_say_preloved, aspect_matching._first_offered,
+        _condition_rubric,
         aspect_matching.size_display,
         aspect_matching.match_colour, aspect_matching._marker_first,
         _resolve_colour, _primary_image, vision.colour_from_image,
@@ -132,6 +135,11 @@ def _sizing_fingerprint() -> str:
     parts.append(repr(sorted(aspect_matching.SIZE_ALIASES.items())))
     parts.append(repr(sorted(aspect_matching.COLOUR_FAMILY_ALIASES.items())))
     parts.append(repr(aspect_matching._SIZE_MARKERS))
+    for pattern in (aspect_matching._PRELOVED_RE, aspect_matching._NEW_RE,
+                    aspect_matching._NO_TAGS_RE):
+        parts.append(pattern.pattern)
+    parts.append(repr(aspect_matching.NEW_CONDITION_IDS))
+    parts.append(repr(aspect_matching.PREOWNED_PREFERENCE))
     # The vision prompt decides what colour comes back, so an edit to it has
     # to invalidate every cached listing exactly as a sizing change does.
     parts.append(vision.SYSTEM)
@@ -609,11 +617,13 @@ def _condition_rubric(category: ebay_template.CategorySpec) -> str:
     return (
         "Choose the eBay Condition ID that best matches the item's actual state, "
         "from exactly these options for this category:\n" + "\n".join(lines) + "\n"
-        "Preloved designer resale should usually be one of the Pre-owned tiers "
-        "(Excellent/Good/Fair) based on the condition notes: Excellent = like new, "
-        "no visible wear; Good = light wear consistent with gentle use, well "
-        "maintained; Fair = noticeable wear or flaws. Only use a 'New' tier if the "
-        "notes (or their absence alongside other signals) clearly indicate unworn."
+        "The condition notes are written by whoever inspected the item and are "
+        "authoritative: if they say the item is new, choose a 'New' tier; if they "
+        "say preloved, pre-owned, used or second-hand, choose a Pre-owned tier. "
+        "Within the Pre-owned tiers pick from the notes: Excellent = like new, no "
+        "visible wear; Good = light wear consistent with gentle use, well "
+        "maintained; Fair = noticeable wear or flaws. Where the notes say nothing "
+        "either way, preloved designer resale is usually Pre-owned."
     )
 
 
@@ -967,6 +977,15 @@ def generate_for_product(
     # language and stockist names are stripped here regardless of what came
     # back. If scrubbing empties the condition description entirely, it falls
     # back to the plain condition label rather than shipping a blank.
+    # The note decides the condition, not the model -- see
+    # aspect_matching.enforce_condition. Done before the description is
+    # scrubbed so the fallback label below is the label of the condition
+    # actually being written.
+    result["condition_id"] = aspect_matching.enforce_condition(
+        result.get("condition_id"),
+        product.measurements.get("Description"),
+        category.conditions)
+
     scrubbed = aspect_matching.scrub_internal_references(
         result.get("condition_description"))
     if not scrubbed.strip():

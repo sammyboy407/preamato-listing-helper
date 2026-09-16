@@ -194,6 +194,75 @@ def match_brand(raw: str | None, valid_values: list[str] | None) -> str:
 # Keys are in the form _size_alias_key produces: lowercased, with spaces,
 # hyphens, dots and underscores collapsed to one space, so "X-LARGE",
 # "X LARGE" and "x  large" all land on the same entry.
+# Condition, decided in Python rather than left to the model.
+#
+# 16.09.26: new Dior stock went out described as pre-owned, and two
+# identical items from one parcel came back as different conditions (1000
+# and 1500). _condition_rubric leans the model towards the pre-owned tiers,
+# which is right for most of this stock and wrong every single time the
+# inspection note says the item is new -- and that note is the one field
+# that actually knows, written by whoever had the garment in their hands.
+#
+# A prompt is not a guarantee. Same lesson as the brand casing, the size and
+# the internal grading codes, so the note decides and the model is overruled.
+#
+# Sammy's rule, 16.09.26: a bare "NEW" is New with tags (1000); it is only
+# 1500 when the note actually says the tags are missing.
+_PRELOVED_RE = re.compile(
+    r"\b(PRE[\s-]?LOVED|PRE[\s-]?OWNED|SECOND[\s-]?HAND|USED)\b")
+_NEW_RE = re.compile(r"\b(NEW|BNWT|BNIB|DEADSTOCK|UNWORN)\b")
+# "WORN" is deliberately not a preloved marker: it sits inside "UNWORN", and
+# "NOT WORN" means the opposite of what matching it would imply.
+_NO_TAGS_RE = re.compile(
+    r"(WITHOUT TAG|NO TAG|TAGS? NOT ATTACHED|NOT ATTACHED|UNTAGGED)")
+
+NEW_CONDITION_IDS = (1000, 1500, 1750)
+PREOWNED_PREFERENCE = (3000, 2990, 3010)
+
+
+def _first_offered(preferred, conditions) -> int | None:
+    """The first id in `preferred` the category actually offers. Labels vary
+    by category (1000 is "New with tags" on clothing, "New with box" on
+    footwear) so this keys off the id, never the label."""
+    offered = {int(cid) for cid, _ in conditions or []}
+    return next((cid for cid in preferred if cid in offered), None)
+
+
+def notes_say_preloved(notes) -> bool:
+    """The inspection note states the item is second-hand."""
+    return bool(_PRELOVED_RE.search(" ".join(str(notes or "").upper().split())))
+
+
+def condition_from_notes(notes, conditions) -> int | None:
+    """The eBay condition id the inspection note states outright, or None
+    where it states nothing. Preloved wins over new wherever both appear:
+    "PRELOVED - NECK TAG NOT ATTACHED" is a used garment, not a new one."""
+    text = " ".join(str(notes or "").upper().split())
+    if not text or _PRELOVED_RE.search(text):
+        return None
+    if not _NEW_RE.search(text):
+        return None
+    if _NO_TAGS_RE.search(text):
+        return _first_offered((1500, 1000), conditions)
+    return _first_offered((1000, 1500), conditions)
+
+
+def enforce_condition(condition_id, notes, conditions):
+    """The condition actually written to the listing. The note decides when
+    it says anything definite; otherwise the model's answer stands, except
+    that a note saying preloved can never produce a New tier."""
+    stated = condition_from_notes(notes, conditions)
+    if stated is not None:
+        return stated
+    try:
+        current = int(float(condition_id))
+    except (TypeError, ValueError):
+        return condition_id
+    if current in NEW_CONDITION_IDS and notes_say_preloved(notes):
+        return _first_offered(PREOWNED_PREFERENCE, conditions) or current
+    return condition_id
+
+
 SIZE_ALIASES = {
     "os": "One Size",
     "o/s": "One Size",

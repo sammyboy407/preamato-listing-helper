@@ -2429,6 +2429,80 @@ def test_the_word_size_table_is_in_the_cache_fingerprint():
     assert am._size_alias_key in content_generator._sizing_sources()
 
 
+
+# --- condition from the inspection note (16.09.26) -------------------------
+# New Dior stock went out described as pre-owned, and two identical items
+# from one parcel came back as 1000 and 1500. The note is written by whoever
+# held the garment; the model is overruled by it.
+
+_CLOTHING_CONDITIONS = [
+    (1000, "New with tags"), (1500, "New without tags"),
+    (1750, "New with imperfections"), (2990, "Pre-owned - Excellent"),
+    (3000, "Pre-owned - Good"), (3010, "Pre-owned - Fair"),
+]
+# A category whose New tiers are labelled differently and which has no 1000
+# at all, to prove the id is what matters rather than the label.
+_BOXED_CONDITIONS = [
+    (1500, "New without box"), (2990, "Pre-owned - Excellent"),
+    (3000, "Pre-owned - Good"),
+]
+
+
+def test_a_new_inspection_note_beats_the_model():
+    for note, want in [("NEW", 1000), ("new", 1000), ("NEW WITH TAGS", 1000),
+                       ("BNWT", 1000), ("Brand new, unworn", 1000),
+                       ("NEW WITHOUT TAGS", 1500), ("NEW - NO TAGS", 1500),
+                       ("NEW, TAGS NOT ATTACHED", 1500)]:
+        got = am.enforce_condition(3000, note, _CLOTHING_CONDITIONS)
+        assert got == want, f"{note!r} -> {got}, wanted {want}"
+
+
+def test_preloved_beats_new_wherever_both_appear():
+    # The real note on 40556-005-012. "NOT ATTACHED" must not make this new.
+    for note in ["PRELOVED - NECK TAG NOT ATTACHED",
+                 "PRELOVED - WITH TAGS GOOD CONDITION",
+                 "Preloved - good condition, like new",
+                 "Used with defect: some light unstitching on the inside trims."]:
+        assert am.condition_from_notes(note, _CLOTHING_CONDITIONS) is None
+        assert am.enforce_condition(1000, note, _CLOTHING_CONDITIONS) == 3000
+
+
+def test_the_models_preowned_tier_is_left_alone():
+    # Excellent/Good/Fair is a real judgment read off the notes — only a
+    # New tier on a preloved item is overridden.
+    for cid in (2990, 3000, 3010):
+        assert am.enforce_condition(cid, "PRELOVED - GOOD CONDITION",
+                                    _CLOTHING_CONDITIONS) == cid
+
+
+def test_a_silent_note_leaves_the_model_alone():
+    for note in ["", None, "   ", "Small mark on the back"]:
+        assert am.enforce_condition(2990, note, _CLOTHING_CONDITIONS) == 2990
+
+
+def test_only_a_condition_the_category_offers_is_ever_returned():
+    # No 1000 here, so a bare "NEW" must fall to the New tier that exists.
+    assert am.enforce_condition(3000, "NEW", _BOXED_CONDITIONS) == 1500
+    for cid, _ in _BOXED_CONDITIONS:
+        pass
+    assert am.enforce_condition(1500, "PRELOVED", _BOXED_CONDITIONS) == 3000
+
+
+def test_unworn_is_new_and_not_worn_is_not_preloved():
+    # "WORN" sits inside "UNWORN", and "NOT WORN" means the opposite of what
+    # matching it would imply — neither may read as second-hand.
+    assert not am.notes_say_preloved("Unworn, still in its garment bag")
+    assert not am.notes_say_preloved("NEW - NOT WORN")
+
+
+def test_the_condition_rules_are_in_the_cache_fingerprint():
+    from src import content_generator
+    sources = content_generator._sizing_sources()
+    for fn in (am.enforce_condition, am.condition_from_notes,
+               am.notes_say_preloved, am._first_offered):
+        assert fn in sources
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
