@@ -509,6 +509,102 @@ US_SIZED_BRANDS = {
 }
 
 
+# Brands that size in their own house scale, and brands that size
+# continentally. Logged 16.09.26 from Thom Browne's published size guide,
+# after two live rows went out four UK sizes wrong: an ALAIA recorded as a
+# bare "36" and an ATTICO as a bare "40", both of which read as enormous UK
+# sizes rather than the UK 8 they actually are.
+#
+# The two tables solve different halves of the same problem and are applied
+# in this order:
+#
+#   1. A HOUSE SCALE has to be CONVERTED, never prefixed. A prefix produces
+#      a size eBay does not have: there is no "IT 2" or "EU 2" on any
+#      menswear list, and a bare 2 is not there either (menswear bare
+#      numbers run 30-40 even and are chest inches). A Thom Browne men's 2
+#      is an M.
+#   2. A CONTINENTAL brand's bare number just needs its scale said out
+#      loud, which is the cheap half — see the "no conversion needed on
+#      clothing" note in the size picklist doc. IT 42 is a UK 10 and EU 42
+#      is a UK 14, so the system has to come from the brand, never a guess.
+#
+# Only ever applied to a bare number. A value that already carries a marker,
+# or is a letter, is left exactly as recorded.
+
+# gender key "*" means the scale is the same for menswear and womenswear.
+BRAND_SIZE_SCALES = {
+    # Thom Browne is the reason this exists: MEN'S is a house scale 00-5,
+    # WOMEN'S is plain Italian 36-48 and falls through to BRAND_SIZE_SYSTEM
+    # below. Same brand, two different problems.
+    "THOM BROWNE": {"MEN": {"00": "2XS", "0": "XS", "1": "S", "2": "M",
+                            "3": "L", "4": "XL", "5": "2XL"}},
+    "MONCLER": {"*": {"0": "XS", "1": "S", "2": "M", "3": "L", "4": "XL", "5": "2XL"}},
+    "VISVIM": {"*": {"1": "S", "2": "M", "3": "L", "4": "XL", "5": "2XL"}},
+    "ISSEY MIYAKE HOMME PLISSE": {"*": {"1": "S", "2": "M", "3": "L", "4": "XL"}},
+    "ISSEY MIYAKE": {"*": {"1": "S", "2": "M", "3": "L", "4": "XL"}},
+    "HOMME PLISSE ISSEY MIYAKE": {"*": {"1": "S", "2": "M", "3": "L", "4": "XL"}},
+    # Zimmermann's 0-4 are UK sizes rather than letters. eBay's womenswear
+    # bare numbers ARE UK sizes, so these go in bare.
+    "ZIMMERMANN": {"*": {"0": "6", "1": "8", "2": "10", "3": "12", "4": "14"}},
+}
+
+# Deliberately NOT in the table: AURALEE. The clothing size-marking note
+# says "0-5 runs XS to XXL, so 4=L", which contradicts itself (0-5 across
+# XS-XXL makes 4 an XL). One wrong entry here ships a garment two sizes out,
+# so it stays out until someone checks a real Auralee label.
+BRAND_SCALES_NEEDING_CONFIRMATION = ("AURALEE", "MATTEAU", "RACIL", "DOLCE & GABBANA")
+
+BRAND_SIZE_SYSTEM = {
+    "MONCLER": "IT", "BOTTEGA VENETA": "IT", "OFF-WHITE": "IT", "OFF WHITE": "IT",
+    "TWINSET": "IT", "MIU MIU": "IT", "ALESSANDRA RICH": "IT", "TALLER MARMO": "IT",
+    "FEBEN": "IT", "WALES BONNER": "IT", "DRUMOHR": "IT", "ERMENEGILDO ZEGNA": "IT",
+    "J.W.ANDERSON": "IT", "JW ANDERSON": "IT", "TOM FORD": "IT", "THOM BROWNE": "IT",
+    # Confirmed by the 16.09.26 batch: the Fendi skirt's note says "EU 40"
+    # but the verified UK size on the row is 8, which is an IT 40, not an
+    # EU 40 (that would be a UK 12). Attico is Milanese and sizes the same.
+    "FENDI": "IT", "ATTICO": "IT", "THE ATTICO": "IT",
+    "CHLOE": "EU", "ALAIA": "EU", "MUGLER": "EU", "ISABEL MARANT ETOILE": "EU",
+    "ISABEL MARANT": "EU", "ACNE STUDIOS": "EU", "GAUGE81": "EU", "NINA RICCI": "EU",
+}
+
+# Below this, a bare number on a continental brand is a UK size the team
+# wrote (a Fendi 8), not a continental one. eBay's continental clothing
+# lists start at 32 womenswear and 42 menswear, so nothing under 30 can be
+# one, and prefixing a UK 8 into an "IT 8" would invent a size.
+CONTINENTAL_SIZE_FLOOR = 30
+
+_BARE_NUMBER_SIZE_RE = re.compile(r"^\s*(\d{1,3})\s*$")
+
+
+def brand_size_scale(brand, gender):
+    """The house scale for this brand and gender, or None."""
+    scales = BRAND_SIZE_SCALES.get(_normalise_brand(brand))
+    if not scales:
+        return None
+    g = _normalise_brand(gender)
+    return scales.get(g) or scales.get("*")
+
+
+def resolve_brand_size(raw, brand=None, gender=None) -> str:
+    """A bare number read through the brand's own sizing, so it reaches
+    eBay as a size eBay has. Anything that is not a bare number -- a letter,
+    an already-marked "IT 42", a range -- is returned untouched."""
+    text = " ".join(str(raw or "").strip().split())
+    m = _BARE_NUMBER_SIZE_RE.match(text)
+    if not m:
+        return text
+    number = m.group(1)
+    scale = brand_size_scale(brand, gender)
+    # "00" and "0" are different Thom Browne sizes, so the raw digits are
+    # looked up before any int() normalisation flattens them together.
+    if scale and number in scale:
+        return scale[number]
+    system = BRAND_SIZE_SYSTEM.get(_normalise_brand(brand))
+    if system and int(number) >= CONTINENTAL_SIZE_FLOOR:
+        return f"{system} {number}"
+    return text
+
+
 def _normalise_brand(brand) -> str:
     return " ".join(str(brand or "").strip().upper().split())
 

@@ -2503,6 +2503,77 @@ def test_the_condition_rules_are_in_the_cache_fingerprint():
         assert fn in sources
 
 
+
+# --- brand sizing scales (16.09.26) ----------------------------------------
+# Two rows went out four UK sizes wrong: an ALAIA recorded as a bare "36"
+# and an ATTICO as "40", both read as enormous UK sizes rather than the UK 8
+# they are. A rejection is annoying; a silently-accepted wrong size ships.
+
+
+def test_a_house_scale_is_converted_never_prefixed():
+    # There is no "IT 2" or "EU 2" on any eBay menswear list, and a bare 2
+    # is not there either, so a prefix would invent a size.
+    assert am.resolve_brand_size("2", "THOM BROWNE", "MEN") == "M"
+    assert am.resolve_brand_size("3", "MONCLER", "MEN") == "L"
+    assert am.resolve_brand_size("2", "visvim", "MEN") == "M"
+    assert am.resolve_brand_size("2", "ZIMMERMANN", "WOMEN") == "10"
+
+
+def test_thom_browne_double_zero_is_not_zero():
+    # 00 and 0 are two different Thom Browne sizes, so the raw digits are
+    # looked up before any int() flattens them together.
+    assert am.resolve_brand_size("00", "THOM BROWNE", "MEN") == "2XS"
+    assert am.resolve_brand_size("0", "THOM BROWNE", "MEN") == "XS"
+
+
+def test_one_brand_can_have_a_house_scale_and_a_continental_one():
+    # Thom Browne menswear is a house scale 00-5; womenswear is plain
+    # Italian and has to fall through to the marker instead.
+    assert am.resolve_brand_size("2", "THOM BROWNE", "MEN") == "M"
+    assert am.resolve_brand_size("40", "THOM BROWNE", "WOMEN") == "IT 40"
+
+
+def test_the_continental_system_comes_from_the_brand_not_a_guess():
+    # IT 42 is a UK 10 and EU 42 is a UK 14 — the whole point of the table.
+    assert am.resolve_brand_size("36", "ALAIA", "WOMEN") == "EU 36"
+    assert am.resolve_brand_size("40", "ATTICO", "WOMEN") == "IT 40"
+    assert am.resolve_brand_size("42", "MONCLER", "WOMEN") == "IT 42"
+
+
+def test_a_small_number_on_a_continental_brand_is_a_uk_size_not_a_continental_one():
+    # The Fendi skirt on the 16.09.26 batch is a verified UK 8. Prefixing it
+    # into an "IT 8" would invent a size eBay does not have.
+    assert am.resolve_brand_size("8", "FENDI", "WOMEN") == "8"
+    assert am.resolve_brand_size("12", "MONCLER", "WOMEN") == "12"
+
+
+def test_anything_that_is_not_a_bare_number_is_left_alone():
+    for raw, brand in [("L", "THOM BROWNE"), ("IT 42", "MONCLER"), ("UK 10", "ALAIA"),
+                       ("2.5-3.5", "MOON BOOT"), ("S/M", "ATTICO"), ("", "FENDI")]:
+        assert am.resolve_brand_size(raw, brand, "WOMEN") == raw
+
+
+def test_an_unknown_brand_is_never_guessed_at():
+    # AMIRI is in neither table, so its 38 is passed through for the
+    # pre-flight to flag rather than being prefixed on a hunch.
+    assert am.resolve_brand_size("38", "AMIRI", "MEN") == "38"
+    assert am.resolve_brand_size("40", "SOME NEW LABEL", "WOMEN") == "40"
+
+
+def test_auralee_is_deliberately_not_in_the_table():
+    # The source note contradicts itself on what a 4 is, and one wrong entry
+    # here ships a garment two sizes out.
+    assert "AURALEE" not in am.BRAND_SIZE_SCALES
+    assert "AURALEE" in am.BRAND_SCALES_NEEDING_CONFIRMATION
+
+
+def test_the_brand_scales_are_in_the_cache_fingerprint():
+    from src import content_generator
+    sources = content_generator._sizing_sources()
+    for fn in (am.resolve_brand_size, am.brand_size_scale):
+        assert fn in sources
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
