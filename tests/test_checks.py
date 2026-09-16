@@ -1720,6 +1720,59 @@ def test_a_product_is_offered_its_own_department_first():
           got[:len(shoes)], shoes)
 
 
+
+# --- QC tier 1: our own fields disagreeing (16.09.26) ----------------------
+# A SAINT LAURENT Loulou Puffer went LIVE reading "Style: Backpack" with an
+# "Exterior Material: Acetate" on a bag whose composition is Leather 100
+# four times over. Both are two of our own fields contradicting each other,
+# which needs no AI and no photograph to settle.
+
+
+def test_qc_catches_the_saint_laurent():
+    from src import qc
+    row = {"Title": "SAINT LAURENT Womens Loulou Puffer Small Black Leather "
+                    "Shoulder Bag RRP 1845",
+           "C:Style": "Backpack", "C:Exterior Material": "Acetate"}
+    found = qc.contradictions(row, "Leather 100 Leather 100 Leather 100")
+    assert len(found) == 2, found
+    assert any("C:Style" in f and "Shoulder Bag" in f for f in found), found
+    assert any("Exterior Material" in f for f in found), found
+
+
+def test_qc_does_not_cry_wolf():
+    from src import qc
+    clean = [
+        # eBay's word is coarser than ours. Lambskin IS leather.
+        ({"Title": "PROENZA SCHOULER Womens Grey Lambskin Slide Bag RRP 645",
+          "C:Style": "Shoulder Bag", "C:Exterior Material": "Leather"},
+         "Lambskin 100 Lambskin 100"),
+        # A multi-value cell is fine if ANY value is in the composition.
+        ({"Title": "CHLOE Womens Plage Tote Bag Yellow RRP 945",
+          "C:Style": "Tote", "C:Exterior Material": "Cotton|Leather"},
+         "Cotton 100 Calf Leather 100"),
+        # "Handbag" names no shape, so Style is not second-guessed.
+        ({"Title": "MAGDA BUTRYM Womens Small Devana Bag Black Leather Handbag RRP 845",
+          "C:Style": "Shoulder Bag", "C:Exterior Material": "Leather"},
+         "Calf Leather 100"),
+        # Zamak and ABS are metal and plastic under other names.
+        ({"Title": "J.W.ANDERSON Womens Corner Crossbody Bag Brown RRP 795",
+          "C:Style": "Crossbody", "C:Exterior Material": "Leather|Metal|Plastic"},
+         "Zamak 50 Acrylonitrile Butadiene Styrene (ABS) 50"),
+        # No composition recorded: nothing to contradict.
+        ({"Title": "SOME BRAND Womens Tote Bag RRP 200",
+          "C:Style": "Tote", "C:Exterior Material": "Leather"}, ""),
+    ]
+    for row, comp in clean:
+        assert qc.contradictions(row, comp) == [], (row["Title"], comp)
+
+
+def test_qc_photo_check_never_raises_and_never_blocks_on_doubt():
+    from src import qc
+    # No photo, a bad URL, nothing to check: silence, not an exception.
+    assert qc.check_against_photo({"Title": "X"}, None) == []
+    assert qc.check_against_photo({"Title": "X"}, "not-a-url") == []
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

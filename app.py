@@ -382,6 +382,15 @@ force_regenerate = st.checkbox(
     help="By default, products already processed in a previous run are reused for free. Check this to force fresh AI output for every product.",
 )
 
+photo_qc = st.checkbox(
+    "QC every listing against its photograph (slower)",
+    value=True,
+    help="After the listings are written, checks each one against its own main "
+         "photo and holds back anything the picture clearly contradicts. Adds "
+         "roughly ten to twenty minutes on a full batch. The free checks — an "
+         "aspect that disagrees with the title or the composition — always run.",
+)
+
 schedule_time_str = None
 schedule_invalid = False
 schedule_enabled = st.checkbox(
@@ -471,6 +480,7 @@ if run_clicked:
                 force_regenerate=force_regenerate,
                 schedule_time=schedule_time_str,
                 price_percent=float(price_percent),
+                photo_qc=bool(photo_qc),
                 on_progress=on_progress,
             )
             persisted = []

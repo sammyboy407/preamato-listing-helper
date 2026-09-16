@@ -20,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import (brand_blurb, build, builtin_catalog, category_mapping, config,
+from . import (brand_blurb, build, builtin_catalog, category_mapping, qc, config,
                content_generator, data_loader, ebay_template, validation)
 from . import aspect_matching
 
@@ -210,6 +210,7 @@ def run(
     schedule_time: str | None = None,
     price_percent: float = config.START_PRICE_RATIO * 100,
     combine_output: bool = True,
+    photo_qc: bool = False,
     on_progress: ProgressFn = _noop,
 ) -> tuple[list[TemplateResult], int, list[str], list[str], "HeldBack"]:
     """Runs the full pipeline. Returns (template_results, num_products_considered,
@@ -452,6 +453,14 @@ def run(
         # the needs-attention file with its reasons, so that what the app
         # hands over is a file that uploads clean.
         reasons = validation.blocking_reasons(row_issues)
+
+        # QC tier 1: two of our own fields disagreeing with each other.
+        # Free, certain, and it is exactly what a SAINT LAURENT shoulder bag
+        # needed to not go live reading "Style: Backpack" on 16.09.26. Held
+        # out rather than merely reported, Sammy's call: a revise costs far
+        # more than a re-run.
+        reasons = list(reasons) + qc.contradictions(row, p.master.get("Composition"))
+
         if reasons:
             held.append((idx, row, reasons))
             held_skus.append(p.sku)
@@ -467,6 +476,49 @@ def run(
         tr.rows.append(row)
         if category.category_name not in tr.category_names:
             tr.category_names.append(category.category_name)
+
+    # QC tier 2: every assembled listing against its own main photograph.
+    # The only tier that catches source data that is wrong in the same way
+    # across every field -- the Brook St sheet had Product name and Colour
+    # shuffled and 24 of 48 would have listed as the wrong item. Nothing but
+    # the picture disagrees with that.
+    if photo_qc and results_by_template:
+        checked = [(idx, row) for idx, tr in results_by_template.items() for row in tr.rows]
+        on_progress(f"QC: checking {len(checked)} listing(s) against their photographs...", 0.93)
+        flagged: dict[str, list[str]] = {}
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {}
+            for _idx, row in checked:
+                urls = build.split_image_urls(row.get("Item photo URL"))
+                futures[pool.submit(qc.check_against_photo, row,
+                                    urls[0] if urls else None)] = row
+            done = 0
+            for fut in as_completed(futures):
+                row = futures[fut]
+                done += 1
+                on_progress(f"[QC {done}/{len(checked)}] {row.get('Custom label (SKU)')}",
+                            0.93 + 0.05 * done / max(len(checked), 1))
+                try:
+                    problems = fut.result()
+                except Exception:  # noqa: BLE001 - QC never fails a batch
+                    problems = []
+                if problems:
+                    flagged[str(row.get("Custom label (SKU)"))] = problems
+        if flagged:
+            for idx, tr in list(results_by_template.items()):
+                keep = []
+                for row in tr.rows:
+                    sku = str(row.get("Custom label (SKU)"))
+                    if sku in flagged:
+                        held.append((idx, row, flagged[sku]))
+                        held_skus.append(sku)
+                    else:
+                        keep.append(row)
+                tr.rows = keep
+            results_by_template = {i: t for i, t in results_by_template.items() if t.rows}
+        on_progress(f"QC done: {len(flagged)} held back, "
+                    f"{len(checked) - len(flagged)} clean.", 0.98)
+
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
