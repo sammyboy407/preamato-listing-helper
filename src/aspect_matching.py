@@ -1477,6 +1477,52 @@ _TYPE_TITLE_PATTERNS: list[tuple[str, list[str]]] = [
 _TYPE_TITLE_FALLBACKS: tuple[str, ...] = ("Blouse", "One-Piece")
 
 
+# What a bag's own title says it is. 16.09.26: a SAINT LAURENT Loulou
+# Puffer went live as "Style: Backpack" while its title read "...Small
+# Black Leather Shoulder Bag". Style on Bags (169291) is a closed list the
+# model picks from, and nothing checked its answer against the item.
+#
+# The title is the better source here and it is free: it is built from the
+# supplier's own product name, which names the bag shape
+# ("SLP PUFFER LOULOU SML SILV HW SHLDR BG BAG"). So where the title names
+# a shape, it wins; where it names none, the model's answer stands.
+#
+# Order matters. "Shoulder Bag" is last because a crossbody, a bucket and a
+# hobo are all worn on the shoulder and their own word is the specific one.
+_STYLE_TITLE_PATTERNS: list[tuple[str, list[str]]] = [
+    ("Backpack", [r"\bback\s?pack\b", r"\brucksack\b"]),
+    ("Belt Bag", [r"\bbelt bag\b", r"\bbum\s?bag\b", r"\bwaist bag\b",
+                  r"\bfanny pack\b"]),
+    ("Bucket Bag", [r"\bbucket\b"]),
+    ("Clutch", [r"\bclutch\b", r"\bpouch\b", r"\bpochette\b"]),
+    ("Top Handle Bag", [r"\btop[\s-]?handle\b"]),
+    ("Satchel", [r"\bsatchel\b"]),
+    ("Hobo", [r"\bhobo\b"]),
+    ("Tote", [r"\btote\b", r"\bshopper\b"]),
+    ("Crossbody", [r"\bcross[\s-]?body\b"]),
+    ("Shoulder Bag", [r"\bshoulder bag\b", r"\bshldr\b"]),
+]
+
+
+def match_style_from_title(title: str | None, valid_values: list[str] | None) -> str | None:
+    """The bag style the product's own title names, or None.
+
+    Never returns a value the category does not offer, and never invents one
+    for a title that names no shape -- the model's answer is kept in that
+    case, exactly as before."""
+    if not title or not valid_values:
+        return None
+    lowered = str(title).lower()
+    available = {v.lower(): v for v in valid_values}
+    for canonical, patterns in _STYLE_TITLE_PATTERNS:
+        real = available.get(canonical.lower())
+        if not real:
+            continue
+        if any(re.search(p, lowered) for p in patterns):
+            return real
+    return None
+
+
 def match_type_from_title(title: str | None, valid_values: list[str] | None) -> str | None:
     """Guesses C:Type from the product's own internal title when the raw
     SubCat2 value doesn't fuzzy-match any of a category's real options.

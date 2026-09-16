@@ -2687,6 +2687,58 @@ def test_the_brand_is_never_eaten_into_the_description():
         "Satin Teddy Jacket Black S RRP 1345", "BURC AKYOL"
     ) == "BURC AKYOL Satin Teddy Jacket Black S RRP 1345"
 
+
+# --- bag style from the title (16.09.26) -----------------------------------
+# A SAINT LAURENT Loulou Puffer went LIVE as "Style: Backpack" while its own
+# title read "...Small Black Leather Shoulder Bag". Style on Bags is a
+# closed list the model picks from and nothing checked its answer.
+
+_BAG_STYLES = ["Backpack", "Belt Bag", "Bucket Bag", "Clutch", "Crossbody",
+               "Hobo", "Satchel", "Shoulder Bag", "Top Handle Bag", "Tote"]
+
+
+def test_the_title_decides_the_bag_style():
+    for title, want in [
+        ("SAINT LAURENT Womens Loulou Puffer Small Black Leather Shoulder Bag RRP 1845",
+         "Shoulder Bag"),
+        ("DEMELLIER Womens Vancouver White Leather Crossbody Bag RRP 445", "Crossbody"),
+        ("CULT GAIA Womens Mela Clutch Metallic Bag RRP 745", "Clutch"),
+        ("AMIRI Arts District Backpack Black Nylon Mens Bag RRP 1045", "Backpack"),
+        ("CHLOE Womens Plage Large Washed Cotton Tote Bag Yellow RRP 945", "Tote"),
+        ("CULT GAIA Womens Lydia Top Handle Bag Straw RRP 445", "Top Handle Bag"),
+    ]:
+        got = am.match_style_from_title(title, _BAG_STYLES)
+        assert got == want, f"{title[:40]!r} -> {got!r}, wanted {want!r}"
+
+
+def test_the_specific_word_beats_shoulder():
+    # A crossbody, a bucket and a hobo are all worn on the shoulder, so
+    # their own word has to win over the generic one.
+    assert am.match_style_from_title(
+        "LEMAIRE Croissant Crossbody Shoulder Bag White RRP 845", _BAG_STYLES) == "Crossbody"
+    assert am.match_style_from_title(
+        "STAUD Bucket Shoulder Bag Tan RRP 295", _BAG_STYLES) == "Bucket Bag"
+
+
+def test_a_title_naming_no_shape_leaves_the_model_alone():
+    # "Handbag" is not a shape, so the model's answer stands rather than
+    # being replaced with a guess.
+    assert am.match_style_from_title(
+        "MAGDA BUTRYM Womens Small Devana Bag Black Leather Handbag RRP 845",
+        _BAG_STYLES) is None
+
+
+def test_a_style_the_category_does_not_offer_is_never_returned():
+    assert am.match_style_from_title(
+        "SOME BRAND Backpack Black RRP 200", ["Tote", "Clutch"]) is None
+    assert am.match_style_from_title("SOME BRAND Backpack", None) is None
+
+
+def test_the_style_patterns_are_in_the_cache_fingerprint():
+    from src import content_generator
+    assert am.match_style_from_title in content_generator._sizing_sources()
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

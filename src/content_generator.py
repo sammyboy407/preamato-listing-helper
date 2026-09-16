@@ -91,6 +91,7 @@ def _sizing_sources() -> list:
         aspect_matching.scrub_internal_references, _inspection_flag,
         aspect_matching.scrub_generic_trademarks,
         aspect_matching.match_type_from_title,
+        aspect_matching.match_style_from_title,
         aspect_matching.match_materials,
         aspect_matching._material_candidates,
         aspect_matching.match_shoe_size_uk, aspect_matching.match_shoe_size_eu,
@@ -169,6 +170,7 @@ def _sizing_fingerprint() -> str:
     parts.append(repr(sorted(aspect_matching.GENERIC_TRADEMARK_REPLACEMENTS.items())))
     parts.append(aspect_matching._GENERIC_TRADEMARK_RE.pattern)
     parts.append(repr(aspect_matching._TYPE_TITLE_PATTERNS))
+    parts.append(repr(aspect_matching._STYLE_TITLE_PATTERNS))
     parts.append(repr(aspect_matching._TYPE_TITLE_FALLBACKS))
     parts.append(repr(sorted(aspect_matching.MATERIAL_SYNONYMS.items())))
     parts.append(repr(sorted(aspect_matching.MATERIAL_IGNORED)))
@@ -1077,6 +1079,17 @@ def generate_for_product(
             specifics[name] = spec.values[0]
         else:
             _set_placeholder(specifics, name, spec)
+
+    # The item's own title outranks the model on what shape of bag it is.
+    # 16.09.26: a Loulou Puffer shoulder bag went live as "Style: Backpack".
+    # Only overrides where the title actually names a shape; a title that
+    # names none leaves the model's answer alone.
+    style_spec = enum_specs.get("C:Style") or hybrid_specs.get("C:Style")
+    if style_spec is not None:
+        from_title = aspect_matching.match_style_from_title(
+            result.get("title"), style_spec.values)
+        if from_title and specifics.get("C:Style") != from_title:
+            specifics["C:Style"] = from_title
 
     # Anything the AI returned for a field it wasn't asked about (or one on
     # the never-fill list) is discarded — only vetted fields reach the file.
