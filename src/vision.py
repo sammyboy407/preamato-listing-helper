@@ -145,3 +145,127 @@ def _prefer_beige(answer: str, valid_values: list[str]) -> str:
     if preferred and preferred in valid_values:
         return preferred
     return answer
+
+
+# ---------------------------------------------------------------------------
+# Item specifics read off the photograph
+# ---------------------------------------------------------------------------
+#
+# Sammy, 16.09.26, looking at eBay's own suggestion panel on a live Saint
+# Laurent listing: "look at all the item specs we missed out on ... these
+# will get our listings views and clicks."
+#
+# She is right, and the gap is large: the app knows 40 aspects for Bags
+# (169291) and fills 9. Every one eBay suggested was blank -- Closure,
+# Finish, Handle Style, Shape, Accessories, Size.
+#
+# They were blank for a good reason. The content generator works from TEXT:
+# title, composition, colour, size, measurements. Nothing in that data says
+# whether a clasp is magnetic or a bag is quilted. eBay could suggest them
+# because eBay.ai looked at the photographs. So could we -- every item here
+# is shot on a white sweep before it is listed, and that is where these
+# answers live.
+#
+# The same three rules the colour pass earned apply:
+#   - it only ever runs on aspects that came back BLANK. It cannot overwrite
+#     something the data, or a person, already decided.
+#   - it answers from the category's own closed list, as a schema enum, so
+#     it structurally cannot invent "Oatmeal" or "Character: Aladdin".
+#   - it may answer UNSURE, and usually should. A blank Preferred field
+#     costs nothing; a wrong one misleads a buyer and eBay's search.
+
+ASPECTS_SYSTEM = (
+    "You are looking at one studio photograph of a single preloved designer item, "
+    "shot on a plain white background for an eBay listing. Fill in the eBay item "
+    "specifics you can see, choosing only from the options given for each one.\n\n"
+    "Ignore everything that is not the item: the white background sweep, hangers, "
+    "mannequins, stands, shadows, reflections and colour-reference cards. A dust "
+    "bag, box or authenticity card shown alongside the item IS part of what is "
+    "being sold and may be reported under Accessories.\n\n"
+    "Answer UNSURE for anything this photograph does not actually show you. That "
+    "is the expected answer for a great many of these and it is never the wrong "
+    "one. Do not infer from the brand, do not reason from what such an item "
+    "usually has, and do not guess at a detail hidden by the angle, the fold or "
+    "the crop. If you cannot see a closure, it is UNSURE, not the closure that "
+    "bag usually has.\n\n"
+    "A blank field on a listing costs nothing. A confident wrong one misleads a "
+    "buyer and eBay's own search, and is worse than leaving it out."
+)
+
+# Deliberately never asked of a photograph, whatever the category offers.
+# Some of these a picture genuinely cannot settle; the rest are the fields
+# that produced "Character: Aladdin" the last time something was forced to
+# pick (see content_generator.NEVER_FILL_ASPECTS).
+ASPECTS_NEVER_FROM_IMAGE = {
+    "C:Brand", "C:Department", "C:Country of Origin", "C:MPN", "C:Size",
+    "C:Model", "C:Product Line", "C:Character", "C:Theme", "C:Vintage",
+    "C:Handmade", "C:Personalise", "C:Customised", "C:Year Manufactured",
+    "C:Bag Depth", "C:Bag Height", "C:Bag Width", "C:Handle Drop", "C:Strap Drop",
+}
+
+UNSURE = "UNSURE"
+MAX_ASPECTS_PER_CALL = 18
+MAX_VALUES_PER_ASPECT = 40
+
+
+def aspects_from_image(
+    image_url: str | None,
+    blank_specs: dict,
+    title=None,
+    model: str = config.MODEL,
+) -> dict:
+    """Values for blank item specifics, read off the item's own photograph.
+
+    `blank_specs` maps aspect name -> AspectSpec, and must already be only
+    the ones with no value. Returns only confident answers, only ones on the
+    aspect's own list. Returns {} on any failure at all -- a batch of 75 does
+    not die because one CDN link went stale."""
+    if not image_url or not blank_specs:
+        return {}
+    askable = {
+        name: spec for name, spec in blank_specs.items()
+        if name not in ASPECTS_NEVER_FROM_IMAGE
+        and spec.values and 1 < len(spec.values) <= MAX_VALUES_PER_ASPECT
+    }
+    if not askable:
+        return {}
+    # A long prompt is a worse prompt. Fewest options first, because those
+    # are the ones a photograph most reliably settles.
+    ordered = sorted(askable.items(), key=lambda kv: len(kv[1].values))[:MAX_ASPECTS_PER_CALL]
+
+    properties = {}
+    for name, spec in ordered:
+        properties[name] = {
+            "type": "string",
+            "enum": list(spec.values) + [UNSURE],
+            "description": f"{name[2:]}, or {UNSURE} if the photograph does not show it.",
+        }
+    schema = {"type": "object", "properties": properties,
+              "required": [n for n, _ in ordered]}
+
+    described = " ".join(str(title or "").split())
+    user = "Fill in what you can actually see. UNSURE is expected for most of these."
+    if described:
+        user += f"\n\nThe item is listed as: {described}"
+
+    try:
+        result = ai_client.call_structured(
+            system=ASPECTS_SYSTEM,
+            user=user,
+            tool_name="read_item_specifics",
+            input_schema=schema,
+            image_url=image_url,
+            max_retries=2,
+            model=model,
+        )
+    except Exception:  # noqa: BLE001 - item specifics never fail a batch
+        return {}
+
+    filled = {}
+    for name, spec in ordered:
+        answer = str(result.get(name) or "").strip()
+        if not answer or answer == UNSURE:
+            continue
+        if answer in spec.values:
+            filled[name] = answer
+    return filled

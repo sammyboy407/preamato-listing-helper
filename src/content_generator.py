@@ -92,6 +92,7 @@ def _sizing_sources() -> list:
         aspect_matching.scrub_generic_trademarks,
         aspect_matching.match_type_from_title,
         aspect_matching.match_style_from_title,
+        _bag_size_from_title, vision.aspects_from_image,
         aspect_matching.match_materials,
         aspect_matching._material_candidates,
         aspect_matching.match_shoe_size_uk, aspect_matching.match_shoe_size_eu,
@@ -171,6 +172,10 @@ def _sizing_fingerprint() -> str:
     parts.append(aspect_matching._GENERIC_TRADEMARK_RE.pattern)
     parts.append(repr(aspect_matching._TYPE_TITLE_PATTERNS))
     parts.append(repr(aspect_matching._STYLE_TITLE_PATTERNS))
+    parts.append(repr(sorted(BOILERPLATE_ASPECTS.items())))
+    parts.append(repr(_BAG_SIZE_WORDS))
+    parts.append(vision.ASPECTS_SYSTEM)
+    parts.append(repr(sorted(vision.ASPECTS_NEVER_FROM_IMAGE)))
     parts.append(repr(aspect_matching._TYPE_TITLE_FALLBACKS))
     parts.append(repr(sorted(aspect_matching.MATERIAL_SYNONYMS.items())))
     parts.append(repr(sorted(aspect_matching.MATERIAL_IGNORED)))
@@ -186,6 +191,45 @@ def _sizing_fingerprint() -> str:
 
 
 LARGE_LIST_THRESHOLD = 40
+
+# True of every item in this catalogue, and worth saying out loud because
+# eBay treats a filled aspect as a filter a buyer can search by and an empty
+# one as nothing at all. None of these needs a photograph or a model:
+# nothing here is handmade, personalised or customised, and "Vintage" on
+# eBay means 20+ years old, which preloved contemporary designer is not.
+#
+# Only ever written where the aspect exists in the category AND the value is
+# on its own list, and never over a value that is already there.
+BOILERPLATE_ASPECTS = {
+    "C:Handmade": "No",
+    "C:Personalise": "No",
+    "C:Vintage": "No",
+}
+
+# Bags carry a size that is a shape class rather than a fitting, and the
+# title already says it: "Loulou Puffer SMALL", "MICRO Egg Pearl MINI".
+# Ordered longest-first so "Extra Large" is not read as "Large".
+_BAG_SIZE_WORDS = [
+    ("Extra Large", [r"\bextra[\s-]?large\b", r"\bxl\b"]),
+    ("Micro", [r"\bmicro\b"]),
+    ("Mini", [r"\bmini\b"]),
+    ("Medium", [r"\bmedium\b", r"\bmidi\b", r"\bmoyen\b"]),
+    ("Small", [r"\bsmall\b", r"\bsml\b", r"\bpetit\b"]),
+    ("Large", [r"\blarge\b", r"\bmaxi\b"]),
+]
+
+
+def _bag_size_from_title(title, valid_values) -> str | None:
+    """The size word the title already carries, or None."""
+    if not title or not valid_values:
+        return None
+    lowered = str(title).lower()
+    available = {v.lower(): v for v in valid_values}
+    for canonical, patterns in _BAG_SIZE_WORDS:
+        real = available.get(canonical.lower())
+        if real and any(re.search(p, lowered) for p in patterns):
+            return real
+    return None
 
 # Aspects that are never filled, whatever eBay says about them. Each one is
 # either meaningless for this stock or unknowable from the data, and every
@@ -878,8 +922,10 @@ def generate_for_product(
     template: ebay_template.EbayTemplate,
     cache_dir: str | Path,
     force: bool = False,
+    read_aspects_from_image: bool = True,
 ) -> dict:
-    cache_key = f"{CACHE_VERSION}-{_sizing_fingerprint()}::{product.sku}::{category.category_id}"
+    cache_key = (f"{CACHE_VERSION}-{_sizing_fingerprint()}::{product.sku}::"
+                 f"{category.category_id}::img{int(bool(read_aspects_from_image))}")
 
     if not force:
         with _CACHE_LOCK:
@@ -1090,6 +1136,39 @@ def generate_for_product(
             result.get("title"), style_spec.values)
         if from_title and specifics.get("C:Style") != from_title:
             specifics["C:Style"] = from_title
+
+    # Free wins, no photograph and no model needed. eBay treats a filled
+    # aspect as something a buyer can filter by and an empty one as nothing,
+    # so a field that is knowably true is worth writing.
+    all_aspects = aspects or {}
+    for name, value in BOILERPLATE_ASPECTS.items():
+        spec = all_aspects.get(name)
+        if spec and spec.values and value in spec.values and not str(
+                specifics.get(name) or "").strip():
+            specifics[name] = value
+    size_spec = all_aspects.get("C:Size")
+    if (size_spec and size_spec.values and not str(specifics.get("C:Size") or "").strip()):
+        from_title = _bag_size_from_title(result.get("title"), size_spec.values)
+        if from_title:
+            specifics["C:Size"] = from_title
+
+    # Everything still blank that a photograph could actually settle.
+    # 16.09.26: the app knew 40 aspects for Bags and filled 9, and every one
+    # eBay's own panel suggested was among the 31 it left empty — because
+    # the text pass above has no picture and Closure, Finish and Shape are
+    # not in the data anywhere. See vision.aspects_from_image.
+    if read_aspects_from_image:
+        blank = {
+            name: spec for name, spec in
+            list(enum_specs.items()) + list(hybrid_specs.items())
+            if not str(specifics.get(name) or "").strip()
+            or specifics.get(name) == _placeholder_for(spec)
+        }
+        if blank:
+            image = _primary_image(product)
+            for name, value in vision.aspects_from_image(
+                    image, blank, title=result.get("title")).items():
+                specifics[name] = value
 
     # Anything the AI returned for a field it wasn't asked about (or one on
     # the never-fill list) is discarded — only vetted fields reach the file.

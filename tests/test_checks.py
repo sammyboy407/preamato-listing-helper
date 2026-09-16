@@ -1773,6 +1773,54 @@ def test_qc_photo_check_never_raises_and_never_blocks_on_doubt():
     assert qc.check_against_photo({"Title": "X"}, "not-a-url") == []
 
 
+
+# --- item specifics coverage (16.09.26) ------------------------------------
+# The app knew 40 aspects for Bags (169291) and filled 9. Every field eBay's
+# own suggestion panel offered was among the 31 it left blank, because the
+# text pass has no photograph and Closure, Finish and Shape are nowhere in
+# the data. Sammy: "these will get our listings views and clicks."
+
+
+def test_bag_size_comes_from_the_title():
+    from src import content_generator as cg
+    sizes = ["Micro", "Mini", "Small", "Medium", "Large", "Extra Large"]
+    for title, want in [
+        ("SAINT LAURENT Womens Loulou Puffer Small Black Leather Shoulder Bag", "Small"),
+        ("SIMONE ROCHA Womens Micro Egg Pearl Mini Crossbody Bag Pink", "Micro"),
+        ("DEMELLIER Womens Miami Black Leather Tote Bag Large", "Large"),
+        ("JACQUEMUS Womens Le Bambola Moyen Tote Bag Burgundy", "Medium"),
+        ("CHLOE Womens Plage Extra Large Washed Cotton Tote", "Extra Large"),
+    ]:
+        got = cg._bag_size_from_title(title, sizes)
+        assert got == want, f"{title[:40]!r} -> {got!r}, wanted {want!r}"
+    # Longest-first, so "Extra Large" is never read as "Large".
+    assert cg._bag_size_from_title("X Extra Large Tote", sizes) == "Extra Large"
+    # A title naming no size is left alone.
+    assert cg._bag_size_from_title("KHAITE Womens Simona Leather Shoulder Bag", sizes) is None
+    # Never a value the category does not offer.
+    assert cg._bag_size_from_title("X Small Bag", ["Mini", "Large"]) is None
+
+
+def test_the_photo_aspect_pass_never_invents_and_never_raises():
+    from src import vision
+    # No image, nothing to ask: silence, not an exception.
+    assert vision.aspects_from_image(None, {"C:Closure": object()}) == {}
+    assert vision.aspects_from_image("https://x/y.jpg", {}) == {}
+
+
+def test_fields_a_photograph_cannot_settle_are_never_asked_of_one():
+    from src import vision
+    for name in ("C:Brand", "C:Country of Origin", "C:MPN", "C:Size",
+                 "C:Bag Height", "C:Model", "C:Character"):
+        assert name in vision.ASPECTS_NEVER_FROM_IMAGE, name
+
+
+def test_the_boilerplate_aspects_are_all_negatives():
+    # Nothing in this catalogue is handmade, personalised, or 20+ years old.
+    from src import content_generator as cg
+    assert set(cg.BOILERPLATE_ASPECTS.values()) == {"No"}
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
