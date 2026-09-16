@@ -2639,6 +2639,54 @@ def test_the_luggage_tables_are_in_the_cache_fingerprint():
         assert fn in sources
 
 
+
+# --- title format (16.09.26) -----------------------------------------------
+# The format is BRAND / gender / description / colour / material / SIZE /
+# RRP nnn, and the RRP is the last thing in it.
+
+
+def test_nothing_comes_after_the_rrp():
+    # The model appended keyword filler after the price on QTN02-001-236,
+    # which buried the RRP mid-title and put "Preloved" in a title where no
+    # other listing in the batch has it.
+    assert am.enforce_title_rrp_tail(
+        "BURC AKYOL Womens Satin Teddy Jacket Black S RRP 1345 Preloved Designer Coat"
+    ) == "BURC AKYOL Womens Satin Teddy Jacket Black S RRP 1345"
+    clean = "GUCCI Womens Silk Dress Black EU 40 RRP 6095"
+    assert am.enforce_title_rrp_tail(clean) == clean
+    # No RRP at all: left alone rather than emptied.
+    assert am.enforce_title_rrp_tail("GUCCI Womens Silk Dress") == "GUCCI Womens Silk Dress"
+
+
+def test_the_brand_is_not_prepended_on_top_of_itself():
+    # The old exact-match check missed a brand the model spelled with
+    # different punctuation, then prepended it anyway.
+    assert am.enforce_title_brand(
+        "J.W. ANDERSON Mens Jumper L Green Merino Wool RRP 495", "J.W.ANDERSON"
+    ) == "J.W.ANDERSON Mens Jumper L Green Merino Wool RRP 495"
+    assert am.enforce_title_brand(
+        "J.W.ANDERSON J.W. ANDERSON Mens Jumper RRP 495", "J.W.ANDERSON"
+    ) == "J.W.ANDERSON Mens Jumper RRP 495"
+    # A repeat hiding behind the gender word.
+    assert am.enforce_title_brand(
+        "J.W.ANDERSON Womens J.W. ANDERSON Victoria Sponge Clutch Bag RRP 695",
+        "J.W.ANDERSON") == "J.W.ANDERSON Womens Victoria Sponge Clutch Bag RRP 695"
+    # The Master File's name is longer than what the model wrote.
+    assert am.enforce_title_brand(
+        "ISSEY MIYAKE HOMME PLISSE MEN Issey Miyake Homme Plisse Kite Blouson XL RRP 645",
+        "ISSEY MIYAKE HOMME PLISSE MEN"
+    ) == "ISSEY MIYAKE HOMME PLISSE MEN Kite Blouson XL RRP 645"
+
+
+def test_the_brand_is_never_eaten_into_the_description():
+    # An exact match must stop there, not swallow the next word.
+    assert am.enforce_title_brand(
+        "DRIES VAN NOTEN Sweater Mens L Blue RRP 595", "DRIES VAN NOTEN"
+    ) == "DRIES VAN NOTEN Sweater Mens L Blue RRP 595"
+    assert am.enforce_title_brand(
+        "Satin Teddy Jacket Black S RRP 1345", "BURC AKYOL"
+    ) == "BURC AKYOL Satin Teddy Jacket Black S RRP 1345"
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

@@ -85,6 +85,7 @@ def _sizing_sources() -> list:
         # cached alongside it — so a change here has to invalidate
         # the cache exactly as a sizing change does.
         aspect_matching.enforce_title_gender, aspect_matching.title_gender_word,
+        aspect_matching.enforce_title_brand, aspect_matching.enforce_title_rrp_tail,
         aspect_matching._drop_dangling_markers,
         aspect_matching.strip_blocked_brand, aspect_matching.collaborating_brand,
         aspect_matching.scrub_internal_references, _inspection_flag,
@@ -142,6 +143,7 @@ def _sizing_fingerprint() -> str:
     parts.append(aspect_matching._HOUSE_NUMBER_WITH_WORD_RE.pattern)
     parts.append(repr(sorted(aspect_matching.LUGGAGE_SIZES.items())))
     parts.append(repr(sorted(aspect_matching.LUGGAGE_SUBCATS)))
+    parts.append(aspect_matching._TITLE_RRP_TAIL_RE.pattern)
     parts.append(repr(sorted(aspect_matching.SIZE_ALIASES.items())))
     parts.append(repr(sorted(aspect_matching.COLOUR_FAMILY_ALIASES.items())))
     parts.append(repr(aspect_matching._SIZE_MARKERS))
@@ -947,13 +949,9 @@ def generate_for_product(
     # its casing; if it somehow left it out entirely, prepend it rather than
     # silently shipping a title with no brand at all.
     brand_raw = str(product.master.get("Brand") or "").strip()
-    title = result.get("title", "")
     if brand_raw:
-        if re.search(re.escape(brand_raw), title, flags=re.IGNORECASE):
-            title = re.sub(re.escape(brand_raw), brand_raw.upper(), title, count=1, flags=re.IGNORECASE)
-        else:
-            title = f"{brand_raw.upper()} {title}".strip()
-        result["title"] = title
+        result["title"] = aspect_matching.enforce_title_brand(
+            result.get("title", ""), brand_raw)
 
     # The title's size must be the SAME size as the item specifics — Sammy,
     # 04.09.26: "it cant show UK7 in the title and then 7.5 in the item
@@ -1021,6 +1019,9 @@ def generate_for_product(
     # survives along with the size and the RRP.
     result["title"] = aspect_matching.trim_title(
         result.get("title", ""), size_for_title, limit=80)
+    # Last of all: nothing comes after the RRP. Run after the trim so a
+    # tail the trim exposed is still cut.
+    result["title"] = aspect_matching.enforce_title_rrp_tail(result["title"])
 
     specifics = _coerce_item_specifics(result.get("item_specifics"))
 

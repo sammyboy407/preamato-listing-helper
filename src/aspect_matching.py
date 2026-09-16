@@ -1503,6 +1503,87 @@ def match_type_from_title(title: str | None, valid_values: list[str] | None) -> 
     return None
 
 
+_TITLE_RRP_TAIL_RE = re.compile(r"\bRRP\s*\d+(?:\.\d+)?", re.IGNORECASE)
+
+
+def enforce_title_rrp_tail(title: str) -> str:
+    """The title ends at the RRP. Nothing comes after the number.
+
+    16.09.26: "BURC AKYOL Womens Satin Teddy Jacket Black S RRP 1345
+    Preloved Designer Coat". The model appended keyword filler after the
+    price, which buries the RRP mid-title, ends the listing on padding, and
+    put the word Preloved in a title where no other listing in the batch has
+    it. The format is BRAND / gender / description / colour / material /
+    SIZE / RRP nnn, and the RRP is the last thing in it."""
+    text = " ".join((title or "").split())
+    matches = list(_TITLE_RRP_TAIL_RE.finditer(text))
+    if not matches:
+        return text
+    return text[:matches[-1].end()].strip()
+
+
+def _leading_brand_run(words, target) -> int:
+    """How many leading words of `words` are the brand `target` (squashed),
+    or 0. A run that is still only part of the brand keeps extending; an
+    exact match stops there rather than swallowing the next word, which is
+    what ate the "Mens" out of "J.W. ANDERSON Mens Jumper"."""
+    best = 0
+    for n in range(1, min(len(words), 8) + 1):
+        span = "".join(_squash(w) for w in words[:n])
+        if not span:
+            break
+        if span == target or span.startswith(target):
+            return n
+        if target.startswith(span):
+            best = n
+            continue
+        break
+    return best
+
+
+def _drop_repeated_brand(words, target) -> list:
+    """The brand written a second time further into the title, removed."""
+    for i in range(len(words)):
+        for n in range(1, min(len(words) - i, 8) + 1):
+            if "".join(_squash(w) for w in words[i:i + n]) == target:
+                return words[:i] + words[i + n:]
+    return list(words)
+
+
+def enforce_title_brand(title: str, brand) -> str:
+    """The brand, upper case, once, at the front.
+
+    Matched ignoring spacing and punctuation, because that is how the old
+    exact-match check produced "J.W.ANDERSON J.W. ANDERSON Mens Jumper" and
+    "ISSEY MIYAKE HOMME PLISSE MEN Issey Miyake Homme Plisse Kite Blouson":
+    the Master File writes the brand one way, the model writes it another,
+    the exact search misses, and the brand is prepended on top of itself."""
+    text = " ".join((title or "").split())
+    name = " ".join(str(brand or "").split())
+    target = _squash(name)
+    if not name or not target:
+        return text
+    words = text.split()
+    run = _leading_brand_run(words, target)
+    if run:
+        words = words[run:]
+        # And again, in case it is already doubled in the input.
+        while True:
+            again = _leading_brand_run(words, target)
+            if not again:
+                break
+            words = words[again:]
+        # A repeat can also hide behind the gender word the model wrote:
+        # "J.W.ANDERSON Womens J.W. ANDERSON Victoria Sponge Clutch Bag".
+        words = _drop_repeated_brand(words, target)
+        return " ".join([name.upper()] + words).strip()
+    for i in range(1, len(words)):
+        for n in range(1, min(len(words) - i, 8) + 1):
+            if "".join(_squash(w) for w in words[i:i + n]) == target:
+                return " ".join(words[:i] + [name.upper()] + words[i + n:]).strip()
+    return f"{name.upper()} {text}".strip()
+
+
 def enforce_title_gender(title: str, department, brand=None) -> str:
     """Puts Mens or Womens straight after the brand.
 
