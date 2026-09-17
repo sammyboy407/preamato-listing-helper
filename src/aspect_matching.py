@@ -233,6 +233,18 @@ def notes_say_preloved(notes) -> bool:
     return bool(_PRELOVED_RE.search(" ".join(str(notes or "").upper().split())))
 
 
+def notes_say_new(notes) -> bool:
+    """The inspection note states the item is new. Read by the brand blurb
+    (which is generated per brand before any condition id exists) so the
+    opening paragraph does not call a new item preloved — see
+    brand_blurb.build_blurbs. Same reading of the note as
+    condition_from_notes: preloved wins wherever both words appear."""
+    text = " ".join(str(notes or "").upper().split())
+    if not text or _PRELOVED_RE.search(text):
+        return False
+    return bool(_NEW_RE.search(text))
+
+
 def condition_from_notes(notes, conditions) -> int | None:
     """The eBay condition id the inspection note states outright, or None
     where it states nothing. Preloved wins over new wherever both appear:

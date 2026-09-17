@@ -65,7 +65,7 @@ _CACHE_LOCK = threading.Lock()
 #
 # CACHE_VERSION is still here for changes the fingerprint can't see (a
 # different prompt, a new deterministic field), and is mixed in alongside it.
-CACHE_VERSION = "v3"
+CACHE_VERSION = "v4"
 
 
 def _sizing_sources() -> list:
@@ -88,7 +88,7 @@ def _sizing_sources() -> list:
         aspect_matching.enforce_title_brand, aspect_matching.enforce_title_rrp_tail,
         aspect_matching._drop_dangling_markers,
         aspect_matching.strip_blocked_brand, aspect_matching.collaborating_brand,
-        aspect_matching.scrub_internal_references, _inspection_flag,
+        aspect_matching.scrub_internal_references,
         aspect_matching.scrub_generic_trademarks,
         aspect_matching.match_type_from_title,
         aspect_matching.match_style_from_title,
@@ -666,21 +666,6 @@ def classify_aspects(
     return enum_specs, hybrid_specs, multi_specs, skipped
 
 
-def _inspection_flag(quality) -> str:
-    """What the model is told about the supplier's quality code.
-
-    Never the code itself, and never a decoded meaning, because there is no
-    key to decode it with. Only that something was flagged, so the condition
-    description can tell a buyer to look at the photos."""
-    raw = str(quality or "").strip().upper()
-    if not raw:
-        return "none"
-    if raw.startswith("QTNDAM"):
-        return ("a possible minor imperfection was flagged — describe it only in "
-                "plain buyer language, never as a grade, code or internal process")
-    return "none"
-
-
 def _condition_rubric(category: ebay_template.CategorySpec) -> str:
     lines = [f"  {cid} = {label}" for cid, label in category.conditions]
     return (
@@ -739,12 +724,26 @@ def _product_brief(product: Product, size_for_title: str | None = None,
         f"Composition/Material (raw, may be messy): "
         f"{m.get('Composition') or meas.get('Material') or '(not recorded)'}",
         f"Country of Origin (raw): {m.get('Country of Origin')}",
-        # The raw grade used to go in here, and the model dutifully wrote
-        # about it: "QTNDAM2" reached 35 buyer-facing descriptions on
-        # 06.09.26. The codes have no decode key, so nobody can say what
-        # QTNDAM2 means, and the SOP's standing instruction is to ignore
-        # them. What survives is the one thing a buyer needs from it.
-        f"Supplier inspection flag: {_inspection_flag(m.get('Quality'))}",
+        # The Master File's Quality column (QTNDAM2/3/4) is not passed here
+        # at all, and must not be reintroduced in any form.
+        #
+        # 06.09.26 it went in raw and the model wrote the code itself:
+        # "QTNDAM2" reached 35 buyer-facing descriptions. The fix then was to
+        # launder it into "a possible minor imperfection was flagged", which
+        # kept the code out of the text but kept the claim — and the claim
+        # was never ours to make. The codes have no decode key.
+        #
+        # 17.09.26 that cost 18 listings in one batch of 75: QTN02-002-586
+        # and 17 others, inspected as NEW, went live reading "This item is
+        # new and unused, but our inspection noted a small imperfection".
+        # The item specific said New with tags; the description said
+        # flawed. A listing that argues with itself is a "not as described"
+        # case waiting to happen, and on a new item it is also simply untrue.
+        #
+        # Sammy's rule, 17.09.26: don't pay any attention to the QTNDAM
+        # codes. Same standing instruction as the bulk upload SOP. The
+        # condition notes below are written by whoever had the item in their
+        # hands and are the only source for what the item is actually like.
         f"Condition notes (from inspection): {meas.get('Description') or '(none given)'}",
         f"RRP: {m.get('Rounded RRP')}",
         f"Measurements (inches) - Pit to Pit: {meas.get('Pit to Pit (inches)') or 'n/a'}, "

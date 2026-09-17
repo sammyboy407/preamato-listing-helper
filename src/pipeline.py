@@ -387,9 +387,21 @@ def run(
         )
         return [], 0, uncovered_skus, [], HeldBack()
 
-    brands = {str(p.m("Brand")) for p, _, _ in assignments if p.m("Brand")}
+    # (brand, condition tier) rather than brand alone: a brand with both new
+    # and preloved stock in one batch needs a paragraph for each, or the new
+    # items open by calling themselves pre-owned (16.09.26, 16 rows). The
+    # tier comes off the inspection note, which is the same thing
+    # aspect_matching.enforce_condition decides the condition id from later
+    # — read here because the blurbs are built before any AI call.
+    brand_tiers = {
+        (str(p.m("Brand")),
+         brand_blurb.NEW if aspect_matching.notes_say_new(p.measurements.get("Description"))
+         else brand_blurb.PRELOVED)
+        for p, _, _ in assignments if p.m("Brand")
+    }
+    brands = {b for b, _ in brand_tiers}
     on_progress(f"Building brand descriptions for {len(brands)} brand(s)...", 0.2)
-    blurb_cache = brand_blurb.build_blurbs(brands, cache_dir)
+    blurb_cache = brand_blurb.build_blurbs(brand_tiers, cache_dir)
     on_progress("Brand descriptions done.", 0.25)
 
     on_progress(f"Generating AI content for {len(assignments)} product(s)...", 0.25)

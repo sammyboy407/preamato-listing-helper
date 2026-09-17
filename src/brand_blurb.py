@@ -18,6 +18,14 @@ Two things this is deliberately designed around:
    sales pitch, with authenticity mentioned only briefly in passing rather
    than dwelt on — not reassurance-desk language ("shop with confidence",
    "our team has done the legwork").
+3. Condition tier. The paragraph names the item as pre-owned, so a brand
+   is cached twice: once for preloved stock and once for new. On 16.09.26
+   sixteen items listed as New with tags opened with "a genuine, pre-owned
+   piece" — the blurb is per brand and never saw the condition, so a brand
+   whose first item was preloved described every later new one the same
+   way. The tier is read off the inspection note
+   (aspect_matching.notes_say_new), which is decided before any AI call,
+   so it is available here even though the condition id is not.
 """
 from __future__ import annotations
 
@@ -78,6 +86,29 @@ AUTHENTICITY_PHRASES = [
     "a genuine piece, once cherished by another owner",
 ]
 
+# The same idea for stock that is genuinely new. Nothing here may imply a
+# previous owner or previous wear — that is the whole point of the split.
+NEW_AUTHENTICITY_PHRASES = [
+    "a genuine piece, new and unworn",
+    "an authentic piece, unworn",
+    "a genuine piece that has never been worn",
+    "authentic, and new",
+    "a true piece from the house, still unworn",
+    "a genuine piece, brand new",
+    "new and entirely authentic",
+    "an authentic piece, new and never worn",
+]
+
+PRELOVED, NEW = "preloved", "new"
+
+
+def blurb_key(brand: str, tier: str = PRELOVED) -> str:
+    """The cache key for one brand at one condition tier. The preloved tier
+    keys on the bare brand name so the blurbs cached before 17.09.26 — and
+    every caller that still passes a plain brand — keep working unchanged."""
+    return brand if tier != NEW else f"{brand}::{NEW}"
+
+
 SYSTEM_TEMPLATE = """You are writing the opening paragraph of an eBay listing description for a \
 preloved designer fashion reseller. The tone should be elegant and editorial — closer to fashion \
 magazine copy than a sales pitch. Avoid customer-service reassurance language entirely (phrases \
@@ -106,8 +137,29 @@ passing, restrained and confident throughout — not this exact structure or wor
 one example of the register wanted):
 "Authentic Saint Laurent, one of the most iconic names in Parisian luxury and a true icon of \
 French fashion, known for effortlessly cool tailoring and pieces that never go out of style. This \
-is a genuine, pre owned piece from one of fashion's most recognisable luxury houses, ideal for \
-the Saint Laurent collector or anyone building a designer wardrobe.\""""
+is {example_phrase} from one of fashion's most recognisable luxury houses, ideal for \
+the Saint Laurent collector or anyone building a designer wardrobe."
+
+{tier_rule}"""
+
+
+# The one line the model must not get wrong, stated as its own rule at the
+# very end of the prompt — after the example, which is the part most likely
+# to be copied wholesale.
+TIER_RULES = {
+    PRELOVED: "This item is pre-owned. Describing it as such is correct.",
+    NEW: "IMPORTANT: this particular item is NEW and has never been worn or used. "
+         "Do not describe it as pre-owned, preloved, second-hand, previously loved, "
+         "previously owned, vintage, or as having had a previous owner or a life "
+         "before this one. Nothing in the paragraph may imply prior wear. The "
+         "brand's own history and heritage is still what you open on — this item's "
+         "history is not, because it does not have one.",
+}
+
+EXAMPLE_PHRASES = {
+    PRELOVED: "a genuine, pre owned piece",
+    NEW: "a genuine piece, new and unworn",
+}
 
 
 def _style_for_brand(brand: str) -> str:
@@ -115,11 +167,12 @@ def _style_for_brand(brand: str) -> str:
     return STYLE_DIRECTIVES[idx]
 
 
-def _authenticity_for_brand(brand: str) -> str:
+def _authenticity_for_brand(brand: str, tier: str = PRELOVED) -> str:
     # Different salt than _style_for_brand so the two picks don't correlate
     # (a brand landing on style #2 shouldn't always also land on phrase #2).
-    idx = int(hashlib.sha256(f"authenticity:{brand}".encode()).hexdigest(), 16) % len(AUTHENTICITY_PHRASES)
-    return AUTHENTICITY_PHRASES[idx]
+    phrases = NEW_AUTHENTICITY_PHRASES if tier == NEW else AUTHENTICITY_PHRASES
+    idx = int(hashlib.sha256(f"authenticity:{brand}".encode()).hexdigest(), 16) % len(phrases)
+    return phrases[idx]
 
 
 def _cache_path(cache_dir: str | Path) -> Path:
@@ -135,18 +188,33 @@ def _save(cache_dir: str | Path, cache: dict) -> None:
     _cache_path(cache_dir).write_text(json.dumps(cache, indent=2, sort_keys=True))
 
 
-def build_blurbs(brands: set[str], cache_dir: str | Path) -> dict[str, str]:
-    """Returns {brand: opening_paragraph}, generating + caching any brand not
-    already cached."""
+def build_blurbs(brands, cache_dir: str | Path) -> dict[str, str]:
+    """Returns {blurb_key: opening_paragraph}, generating + caching any
+    brand/tier pair not already cached.
+
+    `brands` is either a set of (brand, tier) pairs or — for a caller that
+    has no condition information — a plain set of brand names, which is
+    read as the preloved tier. Look the result up with blurb_key(brand,
+    tier); a bare brand name is still a valid key for the preloved tier."""
     cache = _load(cache_dir)
     changed = False
 
-    for brand in sorted(b for b in brands if b):
-        if brand in cache:
+    wanted = {
+        (b, t) for b, t in (
+            item if isinstance(item, tuple) else (item, PRELOVED)
+            for item in brands
+        ) if b
+    }
+
+    for brand, tier in sorted(wanted):
+        key = blurb_key(brand, tier)
+        if key in cache:
             continue
         system = SYSTEM_TEMPLATE.format(
             style_directive=_style_for_brand(brand),
-            authenticity_phrase=_authenticity_for_brand(brand),
+            authenticity_phrase=_authenticity_for_brand(brand, tier),
+            example_phrase=EXAMPLE_PHRASES[tier],
+            tier_rule=TIER_RULES[tier],
         )
         result = ai_client.call_structured(
             system=system,
@@ -160,14 +228,18 @@ def build_blurbs(brands: set[str], cache_dir: str | Path) -> dict[str, str]:
                 f"{brand} is one of the more distinctive names in contemporary designer fashion, "
                 f"known for a consistent point of view and quality construction. This is a "
                 f"genuine, pre-owned piece from the house, offered at a fraction of its original price."
+                if tier != NEW else
+                f"{brand} is one of the more distinctive names in contemporary designer fashion, "
+                f"known for a consistent point of view and quality construction. This is a "
+                f"genuine piece from the house, new and unworn, offered well below its original price."
             )
         # Force the brand mention to match the source data's exact casing,
         # regardless of how the model happened to style it (e.g. "Jil
         # Sander" vs the master file's "JIL SANDER").
         paragraph = re.sub(re.escape(brand), brand, paragraph, count=1, flags=re.IGNORECASE)
-        cache[brand] = paragraph
+        cache[key] = paragraph
         changed = True
-        print(f"  [brand blurb] {brand}")
+        print(f"  [brand blurb] {brand}" + ("" if tier != NEW else " (new)"))
 
     if changed:
         _save(cache_dir, cache)

@@ -127,6 +127,7 @@ def check_row(
     _check_collaboration_title(sku, row, issues)
     _check_internal_references(sku, row, issues)
     _check_length_contradictions(sku, row, issues)
+    _check_condition_contradictions(sku, row, issues)
     _check_description_gaps(sku, row, issues)
 
     return issues
@@ -517,6 +518,56 @@ def _check_length_contradictions(sku, row, issues):
             issues.append(Issue(
                 sku, "REVIEW",
                 f"Style says {style!r} but {field} says {value!r} — these contradict each other"))
+
+
+# Words that tell a buyer the item has been owned or worn before, or that
+# it is flawed. On a New-tier listing every one of them contradicts the
+# item specific eBay shows at the top of the page.
+_PREVIOUS_LIFE_RE = re.compile(
+    r"\b(pre[\s-]?loved|pre[\s-]?owned|previously (?:loved|owned|worn)|"
+    r"second[\s-]?hand|gently worn|light(?:ly)? worn|signs of wear|"
+    r"consistent with (?:gentle |light )?(?:previous )?use|previous owner)\b",
+    re.I)
+_FLAWED_RE = re.compile(
+    r"\b(imperfection|blemish|scuff|scratch|stain|damage[ds]?|"
+    r"minor flaw|small flaw|defects?)\b", re.I)
+
+
+def _check_condition_contradictions(sku, row, issues):
+    """A New-tier listing whose own text says the item is used or flawed.
+
+    17.09.26: 18 of one batch of 75 went live at ConditionID 1000 (New with
+    tags) reading "This item is new and unused, but our inspection noted a
+    small imperfection", and 16 of those also opened with a brand paragraph
+    calling the item pre-owned. Both root causes are fixed upstream (the
+    QTNDAM code no longer reaches the prompt; the brand blurb is cached per
+    condition tier) — this is the net under them, because a prompt is not a
+    guarantee and the next way the model finds to do it will not look like
+    the last one.
+
+    REVIEW rather than blocking, and never auto-corrected: the code cannot
+    tell whether the grade or the sentence is the part that is wrong, and
+    silently deleting a defect sentence is how a flawed item ships described
+    as flawless."""
+    try:
+        condition_id = int(float(_text(row.get("Condition ID"))))
+    except (TypeError, ValueError):
+        return
+    if condition_id not in aspect_matching.NEW_CONDITION_IDS:
+        return
+    # 1750 is "New with defects" — a flaw is the whole point of it, so only
+    # the previous-owner wording is wrong there.
+    description = _text(row.get("Description"))
+    patterns = [("says the item was owned or worn before", _PREVIOUS_LIFE_RE)]
+    if condition_id != 1750:
+        patterns.append(("says the item is flawed", _FLAWED_RE))
+    for label, pattern in patterns:
+        found = pattern.search(description)
+        if found:
+            issues.append(Issue(
+                sku, "REVIEW",
+                f"listed as condition {condition_id} (a New tier) but the description "
+                f"{label} ({found.group(0)!r}) — these contradict each other"))
 
 
 def _check_description_gaps(sku, row, issues):

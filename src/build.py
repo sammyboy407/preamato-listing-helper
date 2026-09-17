@@ -40,7 +40,7 @@ EXTRA_COLUMNS = ["OriginalRetailPrice", "ConditionDescription", "C:Country of Or
 # so this is deliberately a single value rather than "anything new".
 CONDITION_NO_DESCRIPTION = 1000
 
-from . import aspect_matching, config, ebay_template
+from . import aspect_matching, brand_blurb, config, ebay_template
 from .data_loader import Product, split_image_urls
 
 GENDER_POSSESSIVE_MAP = {"WOMEN": "Women's", "MEN": "Men's", "UNISEX": "Unisex"}
@@ -79,7 +79,17 @@ def build_description(
     m, meas = product.master, product.measurements
     brand = m.get("Brand") or ""
 
-    paragraph = blurb_cache.get(brand, "")
+    # The brand paragraph is cached per brand AND per condition tier, so a
+    # new item never opens by calling itself pre-owned (16.09.26, 16 rows —
+    # see brand_blurb). The tier is read off the inspection note, exactly as
+    # pipeline read it when the blurbs were built, so the key is always one
+    # that was generated. A bare brand key is kept as the fallback for a
+    # cache written before 17.09.26, or a caller passing plain brand names.
+    tier = (brand_blurb.NEW
+            if aspect_matching.notes_say_new(meas.get("Description"))
+            else brand_blurb.PRELOVED)
+    paragraph = (blurb_cache.get(brand_blurb.blurb_key(brand, tier))
+                 or blurb_cache.get(brand, ""))
 
     condition_notes = (meas.get("Description") or "").strip()
     condition_line = (

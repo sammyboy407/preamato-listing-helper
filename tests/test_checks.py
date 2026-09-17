@@ -824,6 +824,108 @@ def test_condition_description_is_dropped_for_new_with_box():
               sent_for(condition_id), "Comes without its box.")
 
 
+def test_a_new_listing_that_calls_itself_preloved_is_caught():
+    """17.09.26. 18 rows of one batch of 75 went live at ConditionID 1000
+    (New with tags) reading "This item is new and unused, but our inspection
+    noted a small imperfection", 16 of them opening with a brand paragraph
+    calling the item pre-owned. Both causes are fixed upstream; this is the
+    net under them."""
+    flawed = good_row(**{
+        "Condition ID": 1000,
+        "Description": ("Condition: This item is new and unused, but our inspection "
+                        "noted a small imperfection. <br>\nBrand: SIMONE ROCHA <br>"),
+    })
+    check("a new item described as flawed is reported",
+          any("contradict" in m for m in messages(run(flawed, size="8"))), True)
+
+    owned = good_row(**{
+        "Condition ID": 1000,
+        "Description": ("This is a genuine, pre-owned piece from the house. <br>\n"
+                        "Condition: Brand new and unworn. <br>"),
+    })
+    check("a new item called pre-owned is reported",
+          any("contradict" in m for m in messages(run(owned, size="8"))), True)
+
+    # Nothing is ever rewritten: the code cannot tell whether the grade or
+    # the sentence is the wrong half, and deleting a defect sentence is how
+    # a flawed item ships described as flawless.
+    before = owned["Description"]
+    run(owned, size="8")
+    check("nothing is auto-corrected", owned["Description"], before)
+
+    # 1750 is "New with defects" — the flaw is the point of that grade, so
+    # only the previous-owner wording is wrong there.
+    defects = good_row(**{
+        "Condition ID": 1750,
+        "Description": "Condition: New, with a small imperfection to the hem. <br>",
+    })
+    check("new with defects may mention the defect",
+          any("contradict" in m for m in messages(run(defects, size="8"))), False)
+
+    # And the 57 preloved rows in that same batch must stay silent.
+    preloved = good_row(**{
+        "Condition ID": 3000,
+        "Description": ("A genuine, pre-owned piece. <br>\nCondition: Preloved, with "
+                        "light superficial marks from general handling. <br>"),
+    })
+    check("a preloved listing is silent",
+          any("contradict" in m for m in messages(run(preloved, size="8"))), False)
+
+
+def test_a_new_item_never_opens_by_calling_itself_preloved():
+    """The brand paragraph is generated per brand, before any condition id
+    exists, and was cached once per brand — so a brand whose first item was
+    preloved described every later new one as pre-owned too. It is now
+    cached per brand AND per condition tier, read off the inspection note."""
+    from src import brand_blurb, build
+
+    check("the preloved tier still keys on the bare brand name",
+          brand_blurb.blurb_key("SIMONE ROCHA"), "SIMONE ROCHA")
+    check("the new tier gets its own key",
+          brand_blurb.blurb_key("SIMONE ROCHA", brand_blurb.NEW), "SIMONE ROCHA::new")
+    check("the two tiers never collide",
+          brand_blurb.blurb_key("SIMONE ROCHA") == brand_blurb.blurb_key("SIMONE ROCHA", brand_blurb.NEW),
+          False)
+
+    # No phrase offered for a new item may imply a previous owner.
+    banned = ("pre-owned", "preloved", "previously loved", "second-hand", "cherished by another")
+    for phrase in brand_blurb.NEW_AUTHENTICITY_PHRASES:
+        check(f"new phrase implies no previous owner: {phrase[:28]}",
+              any(b in phrase.lower() for b in banned), False)
+
+    blurbs = {"SIMONE ROCHA": "A genuine, pre-owned piece from the house.",
+              "SIMONE ROCHA::new": "A genuine piece, new and unworn."}
+
+    def paragraph_for(note):
+        product = make_product({"Size": "8", "Description": note})
+        product.master.update({"Rounded RRP": 695, "Colour": "White"})
+        ai_result = {"title": "T", "condition_id": 1000, "condition_description": "New.",
+                     "material_summary": "Silk", "item_specifics": {}}
+        return build.build_description(product, ai_result, CATEGORY, make_template(), blurbs)
+
+    check("a NEW note gets the new paragraph",
+          "new and unworn" in paragraph_for("NEW"), True)
+    check("and never the pre-owned one",
+          "pre-owned" in paragraph_for("NEW"), False)
+    check("a preloved note still gets the pre-owned paragraph",
+          "pre-owned" in paragraph_for("PRELOVED - light marks"), True)
+    # "PRELOVED - NECK TAG NOT ATTACHED" carries both words. Preloved wins,
+    # exactly as it does for the condition id.
+    check("preloved wins where both words appear",
+          "pre-owned" in paragraph_for("PRELOVED - NEW NECK TAG NOT ATTACHED"), True)
+
+    # A cache written before 17.09.26 has only bare brand keys, and must
+    # keep working rather than producing an empty opening paragraph.
+    old_cache = {"SIMONE ROCHA": "A genuine, pre-owned piece from the house."}
+    product = make_product({"Size": "8", "Description": "NEW"})
+    product.master.update({"Rounded RRP": 695, "Colour": "White"})
+    text = build.build_description(
+        product, {"title": "T", "condition_id": 1000, "condition_description": "New.",
+                  "material_summary": "Silk", "item_specifics": {}},
+        CATEGORY, make_template(), old_cache)
+    check("an old cache still produces a paragraph", "genuine" in text, True)
+
+
 def test_internal_references_never_reach_a_buyer():
     """Sammy, 06.09.26: no stockist names, and no QTNDAM codes.
 
@@ -884,12 +986,26 @@ def test_internal_references_never_reach_a_buyer():
     check("the prompt does not contain the code", "QTNDAM" in brief.upper(), False)
     check("nor the words internal quality grade",
           "internal quality grade" in brief.lower(), False)
-    check("but it does still flag that something was found",
-          "imperfection" in brief.lower(), True)
-    clean = make_product({"Description": "Good condition."})
-    clean.master.update({"Quality": "", "Rounded RRP": 695})
-    check("and says none when nothing was flagged",
-          "flag: none" in content_generator._product_brief(clean).lower(), True)
+    # 17.09.26: nor a laundered version of it. The code used to reach the
+    # prompt as "a possible minor imperfection was flagged", which kept the
+    # code out of the text but kept the claim, and 18 items inspected as NEW
+    # went live reading "new and unused, but our inspection noted a small
+    # imperfection". Sammy's rule: don't pay attention to the QTNDAM codes.
+    check("nor a laundered version of the same claim",
+          "imperfection" in brief.lower(), False)
+    check("nor any mention of a supplier flag at all",
+          "flag" in brief.lower(), False)
+    check("the inspection note is what the prompt carries",
+          "Slight mark on the heel." in brief, True)
+
+    # And a genuinely new item's prompt says nothing about a defect, so the
+    # model has nothing to write one from.
+    new_item = make_product({"Description": "NEW"})
+    new_item.master.update({"Quality": "QTNDAM2", "Rounded RRP": 695,
+                            "Category": "Footwear", "SubCat2": "Flat Shoes"})
+    new_brief = content_generator._product_brief(new_item)
+    check("a new item's prompt carries no defect claim",
+          "imperfection" in new_brief.lower() or "flaw" in new_brief.lower(), False)
 
     # End to end, because the prompt is not a guarantee. This is the same
     # shape as the brand casing and the size: asked for in the prompt,
@@ -1413,7 +1529,11 @@ def test_a_row_ebay_would_refuse_never_reaches_the_upload_file():
     originals = (ai_client.call_structured, data_loader.load_products, brand_blurb.build_blurbs)
     ai_client.call_structured = fake_ai
     data_loader.load_products = lambda *a, **k: [good, bad]
-    brand_blurb.build_blurbs = lambda brands, cache_dir: {b: "" for b in brands}
+    # build_blurbs takes (brand, tier) pairs since 17.09.26 and returns
+    # blurb_key-ed entries; the stub mirrors that so it stays honest.
+    brand_blurb.build_blurbs = lambda brands, cache_dir: {
+        brand_blurb.blurb_key(*(b if isinstance(b, tuple) else (b,))): ""
+        for b in brands}
     try:
         with tempfile.TemporaryDirectory() as d:
             out = pathlib.Path(d) / "Upload.csv"
