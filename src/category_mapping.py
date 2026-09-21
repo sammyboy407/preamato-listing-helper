@@ -26,7 +26,7 @@ import json
 import re
 from pathlib import Path
 
-from . import ai_client, ebay_template
+from . import ai_client, aspect_matching, ebay_template
 from .data_loader import Product
 
 # (Master File "Category", "SubCat2") pairs where a single eBay category
@@ -87,6 +87,41 @@ def is_misfiled_footwear(product) -> bool:
     if str(product.m("Category") or "").strip().lower() == "footwear":
         return False
     return _looks_like_footwear(product)
+
+
+# ---------------------------------------------------------------------------
+# Luggage goes to Suitcases, decided in Python, never by the model.
+#
+# 16.09.26 and again 21.09.26: the business files luggage as SubCat2
+# "Homewear", which reads as home textiles to everything downstream. Two Floyd
+# check-in cases (QTN02-001-517/-518) and then a Ralph Lauren 1938 aluminium
+# suitcase (QTN02-002-321, RRP 2445) all came out of the app as
+# Men's Clothing > Nightwear (11510). The Ralph Lauren went on to fail a
+# second time when moved by hand, because Nightwear's condition 3010 does not
+# exist on Suitcases. Fourth time for the "first template that answers wins"
+# shape after Mules, the Givenchy slipper and the Boys' Shoes sneakers.
+#
+# So: a luggage product maps to SUITCASES_CATEGORY_ID in whichever template
+# carries it, and to NOTHING in every template that does not. Nothing means
+# the product is reported as not covered, which a person sees, rather than
+# landing in a clothing category, which nobody does.
+# ---------------------------------------------------------------------------
+SUITCASES_CATEGORY_ID = "11236"
+
+
+def is_luggage_product(product) -> bool:
+    return aspect_matching.is_luggage(product.m("SubCat2"), product.m("Category"))
+
+
+def luggage_entry(template) -> dict | None:
+    """The Suitcases mapping for this template, or None if it has none."""
+    spec = next((c for c in template.categories
+                 if str(c.category_id) == SUITCASES_CATEGORY_ID), None)
+    if spec is None:
+        return None
+    return {"category_id": spec.category_id, "category_name": spec.category_name,
+            "reasoning": "Luggage: routed to Suitcases deterministically "
+                         "(category_mapping.is_luggage_product)."}
 
 
 def covers_footwear(template) -> bool:
@@ -329,7 +364,7 @@ def build_mapping(
     combos = {
         (str(p.m("Category")), str(p.m("SubCat2")), str(p.m("Gender")))
         for p in products
-        if not _needs_its_own_answer(p)
+        if not _needs_its_own_answer(p) and not is_luggage_product(p)
     }
     for category, subcat2, gender in sorted(combos):
         key = _combo_key(category, subcat2, gender, template_fp)
@@ -356,7 +391,8 @@ def build_mapping(
         status = f"{cache[key]['category_id']} ({cache[key]['category_name']})" if cache[key]['category_id'] else "NO MATCH in this template"
         print(f"  [category map] {category} / {subcat2} / {gender} -> {status}")
 
-    ambiguous_products = [p for p in products if _needs_its_own_answer(p)]
+    ambiguous_products = [p for p in products
+                          if _needs_its_own_answer(p) and not is_luggage_product(p)]
     for p in ambiguous_products:
         key = _product_key(p.sku, template_fp)
         if key in cache:
@@ -388,6 +424,11 @@ def build_mapping(
 
 
 def lookup(cache: dict, product: Product, template: ebay_template.EbayTemplate) -> dict | None:
+    # Before any cache read: a cache written before this rule still holds
+    # the Nightwear answer for ("Lifestyle", "Homewear", ...).
+    if is_luggage_product(product):
+        return luggage_entry(template)
+
     template_fp = _template_fingerprint(template)
     category, subcat2, gender = str(product.m("Category")), str(product.m("SubCat2")), str(product.m("Gender"))
 

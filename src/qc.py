@@ -65,8 +65,9 @@ _STYLE_WORDS: dict[str, list[str]] = {
 # Checked as a family rather than a word: eBay's "Leather" is our
 # "Lambskin 100", and flagging that pair would be noise, not a finding.
 _MATERIAL_FAMILIES: dict[str, list[str]] = {
-    "leather": ["leather", "lambskin", "calfskin", "calf", "nappa", "suede",
-                "sheepskin", "goatskin", "shearling", "hide"],
+    "leather": ["leather", "lambskin", "lamb skin", "lamb", "calfskin", "calf",
+                "nappa", "suede", "sheepskin", "goatskin", "goat skin", "shearling",
+                "hide", "cowhide", "cow leather", "patent"],
     "cotton": ["cotton", "denim", "canvas", "corduroy", "poplin", "jersey"],
     "wool": ["wool", "cashmere", "mohair", "alpaca", "merino", "tweed", "felt"],
     "silk": ["silk", "satin", "chiffon", "organza"],
@@ -83,8 +84,14 @@ _MATERIAL_FAMILIES: dict[str, list[str]] = {
     "straw": ["straw", "raffia", "wicker", "rattan", "jute"],
 }
 
+# C:Fabric Type is deliberately NOT here. Its values (Twill, Terry, Knit,
+# Jersey, Denim...) describe how a cloth is made, not what fibre it is made
+# of, so they can never be found in a composition. Checking it held back 5
+# correct listings on 21.09.26 (an Alexander Wang "Essential Terry"
+# sweatshirt for saying Terry, two knits for saying Knit) and eBay accepted
+# every one of them as soon as they were uploaded by hand.
 _MATERIAL_ASPECTS = ("C:Material", "C:Exterior Material", "C:Outer Shell Material",
-                     "C:Upper Material", "C:Fabric Type")
+                     "C:Upper Material")
 
 
 def _families(text: str) -> set:
@@ -120,7 +127,12 @@ def contradictions(row: dict, composition=None) -> list:
             # A multi-value cell is fine if ANY of its values is in the
             # composition; eBay's list is coarser than ours.
             listed = [v for v in value.split("|") if v.strip()]
-            if listed and not any(_families(v) & comp_families for v in listed):
+            # A value that names no family we know cannot be judged, so it
+            # is never evidence of a contradiction. Only a value we CAN read
+            # (Cotton Blend -> cotton) against a composition that has none
+            # of it counts. Absence of knowledge is not a finding.
+            judged = [v for v in listed if _families(v)]
+            if judged and not any(_families(v) & comp_families for v in judged):
                 problems.append(
                     f"{aspect} says {value!r} but the composition is {composition!r}")
     return problems

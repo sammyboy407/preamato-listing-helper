@@ -1886,6 +1886,73 @@ def test_qc_does_not_cry_wolf():
         assert qc.contradictions(row, comp) == [], (row["Title"], comp)
 
 
+def test_qc_holds_back_only_what_is_really_wrong_21_09_26():
+    """The real NEEDS ATTENTION file from 21.09.26. Seven rows were held; eBay
+    took all seven once uploaded by hand. Only one of them had a real
+    contradiction, and that one must still be caught."""
+    from src import qc
+    false_alarms = [
+        ({"Title": "ALEXANDER WANG Womens Essential Terry Crew Sweatshirt S RRP 345",
+          "C:Fabric Type": "Terry", "C:Material": "Cotton|Polyester"},
+         "Cotton 80 Polyester 20 Cotton 80 Polyester 20 Poly"),
+        ({"Title": "LEMAIRE Womens Twisted Cardigan with Scarf Grey XS RRP 495",
+          "C:Fabric Type": "Knit", "C:Material": "Wool|Acrylic"}, "Wool 50 Acrylic 50"),
+        ({"Title": "DRIES VAN NOTEN Womens Hannett Hoodie Pink S RRP 495",
+          "C:Fabric Type": "Knit", "C:Material": "100% Cotton"}, "Cotton 100"),
+        ({"Title": "WARDROBE NYC Womens Wool Coat Black 2XS RRP 2045",
+          "C:Fabric Type": "Twill", "C:Outer Shell Material": "Wool"},
+         "Virgin Wool 100 viscose 100 Virgin Wool 100 Virgin"),
+        ({"Title": "NOUR HAMMOUR Womens Althea Leather Trench Coat Red EU 36 RRP 1495",
+          "C:Outer Shell Material": "Leather"}, "Cupro 63 Fabric 37 Lamb Skin 100"),
+        ({"Title": "CARTER YOUNG Mens Baseball Cap Brown One Size RRP 145",
+          "C:Fabric Type": "Twill", "C:Material": "Cashmere|Cotton|Wool"},
+         "Cashmere 4 Recycled Cotton 52 Virgin Wool 44"),
+    ]
+    for row, comp in false_alarms:
+        assert qc.contradictions(row, comp) == [], (row["Title"], qc.contradictions(row, comp))
+
+    # The real one: a coat that is 82% viscose listed with a cotton shell.
+    found = qc.contradictions(
+        {"Title": "FRANKIE SHOP Womens Tribeca Overcoat Green M RRP 445",
+         "C:Outer Shell Material": "Cotton Blend"},
+        "Elastane 3 Virgin Wool 15 Polyester 100 viscose 82")
+    assert len(found) == 1 and "Outer Shell Material" in found[0], found
+
+    # A value naming nothing we know is never a contradiction on its own.
+    assert qc.contradictions({"Title": "X", "C:Material": "Mousseline"}, "Silk 100") == []
+
+
+def test_luggage_is_a_suitcase_and_never_nightwear():
+    """21.09.26: QTN02-002-321, a Ralph Lauren 1938 aluminium suitcase filed
+    by the business as Lifestyle / Homewear, came out as Men's Clothing >
+    Nightwear for the third time. Luggage is routed in Python now, and a
+    template without Suitcases gives no answer at all rather than a wrong one,
+    even when an old cache holds the Nightwear answer."""
+    from src import category_mapping, ebay_template
+    from src.data_loader import Product
+    here = Path(__file__).resolve().parent.parent / "data" / "templates"
+    home = ebay_template.load_json_template(here / "homeware.json")
+    mens = ebay_template.load_json_template(here / "menswear_clothing.json")
+    case = Product("QTN02-002-321", {"Category": "Lifestyle", "SubCat2": "Homewear",
+                                     "Gender": "UNISEX",
+                                     "Clean Title Description": "RALPH LAUREN HOME RL RALPH LAUREN 1938 BUG 57S HOMEWEAR"}, {})
+    entry = category_mapping.lookup({}, case, home)
+    assert entry and entry["category_id"] == "11236", entry
+    spec = next(c for c in home.categories if c.category_id == "11236")
+    assert 3010 not in [cid for cid, _ in spec.conditions], spec.conditions
+    assert 3000 in [cid for cid, _ in spec.conditions], spec.conditions
+
+    # A stale cache answer of Nightwear is ignored.
+    fp = category_mapping._template_fingerprint(mens)
+    stale = {category_mapping._combo_key("Lifestyle", "Homewear", "UNISEX", fp):
+             {"category_id": "11510", "category_name": "Men's Clothing > Nightwear"}}
+    assert category_mapping.lookup(stale, case, mens) is None
+
+    # Nothing that is not luggage is touched.
+    coat = Product("X", {"Category": "Ready to Wear", "SubCat2": "Coats", "Gender": "WOMEN"}, {})
+    assert not category_mapping.is_luggage_product(coat)
+
+
 def test_qc_photo_check_never_raises_and_never_blocks_on_doubt():
     from src import qc
     # No photo, a bad URL, nothing to check: silence, not an exception.
