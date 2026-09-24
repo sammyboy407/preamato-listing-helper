@@ -41,7 +41,11 @@ Field handling strategy, decided per aspect:
 The free-text "Material:" line used in the Description (build.py) is
 generated separately from any eBay item-specific column, since eBay's own
 Material aspect is often Preferred/Optional with a huge list, and skipped
-under the option above.
+under the option above. 24.09.26: that line now prefers
+aspect_matching.composition_summary() — every fibre in the product's own
+composition, not just the single one C:Outer Shell Material has room for —
+falling back to the AI's free-text guess only when the composition doesn't
+parse to anything. See build.build_description.
 """
 from __future__ import annotations
 
@@ -65,7 +69,7 @@ _CACHE_LOCK = threading.Lock()
 #
 # CACHE_VERSION is still here for changes the fingerprint can't see (a
 # different prompt, a new deterministic field), and is mixed in alongside it.
-CACHE_VERSION = "v4"
+CACHE_VERSION = "v5"
 
 
 def _sizing_sources() -> list:
@@ -95,6 +99,8 @@ def _sizing_sources() -> list:
         _bag_size_from_title, vision.aspects_from_image,
         aspect_matching.match_materials,
         aspect_matching._material_candidates,
+        aspect_matching.match_dominant_material,
+        aspect_matching._material_pct_pairs,
         aspect_matching.match_shoe_size_uk, aspect_matching.match_shoe_size_eu,
         aspect_matching.match_size, aspect_matching._size_alias_key,
         aspect_matching.resolve_brand_size, aspect_matching.brand_size_scale,
@@ -252,7 +258,7 @@ NEVER_FILL_ASPECTS = {
 
 # Aspects resolved deterministically in Python — never asked of the AI.
 DETERMINISTIC_ASPECTS = {"C:Brand", "C:Department", "C:Country of Origin", "C:MPN",
-                         "C:Type", "C:Material"}
+                         "C:Type", "C:Material", "C:Outer Shell Material"}
 
 # Physical garment measurements (inches) — always taken from the verified
 # Pictures & Measurements file, same trust reasoning as Size/Colour/Material
@@ -392,6 +398,17 @@ def _resolve_deterministic(name: str, product: Product, spec: ebay_template.Aspe
         materials = aspect_matching.match_materials(
             [meas.get("Material"), m.get("Composition")], spec.values)
         return "|".join(materials) if materials else None
+    if name == "C:Outer Shell Material":
+        # 24.09.26. Previously AI-guessed (hybrid path) with nothing
+        # checking the guess against the composition, which is how
+        # QTN02-001-545 (Frankie Shop) went out as "Cotton Blend" on a
+        # coat whose composition names Elastane, Wool, Polyester and
+        # Viscose — no cotton at all — and QC's own contradiction check
+        # correctly held it back for the same reason. Same source and the
+        # same "go with whatever percentage is highest" rule as
+        # match_dominant_material's docstring.
+        return aspect_matching.match_dominant_material(
+            [meas.get("Material"), m.get("Composition")], spec.values)
     if name == "C:Type":
         # Confirmed 04.09.26: Type is Master File's SubCat2 column (like
         # Colour/Material/Brand/Gender, entered at intake and carried onto
@@ -623,18 +640,22 @@ def classify_aspects(
     skipped: dict[str, ebay_template.AspectSpec] = {}
 
     for name, spec in aspects.items():
-        # C:Material is resolved from the composition (see
-        # _resolve_deterministic), and that value always wins. But a
-        # composition can name nothing eBay recognises — a homeware plate,
-        # a bag whose "composition" is "Methyl Methacrylate" — and
-        # C:Material is REQUIRED in 24 of this account's categories,
-        # including Nightwear and Men's Bags. Leaving those to the parse
-        # alone would empty a Required field and hold the row out of the
-        # upload file. So when it is Required it ALSO goes to the AI as a
-        # backstop; the deterministic value overwrites it whenever the
-        # parse found something.
+        # C:Material and C:Outer Shell Material are resolved from the
+        # composition (see _resolve_deterministic), and that value always
+        # wins. But a composition can name nothing eBay recognises — a
+        # homeware plate, a bag whose "composition" is "Methyl
+        # Methacrylate" — and both are REQUIRED in a meaningful share of
+        # this account's categories (C:Material in 24, including Nightwear
+        # and Men's Bags; C:Outer Shell Material in every coat/jacket
+        # category). Leaving those to the parse alone would empty a
+        # Required field and hold the row out of the upload file. So when
+        # either is Required it ALSO goes to the AI as a backstop; the
+        # deterministic value overwrites it whenever the parse found
+        # something (24.09.26: this is what stopped Outer Shell Material
+        # being AI-guessed as "Cotton Blend" on an 82% viscose coat with no
+        # cotton in it at all).
         deterministic = name in DETERMINISTIC_ASPECTS
-        if deterministic and name == "C:Material" and spec.level == "REQUIRED":
+        if deterministic and name in ("C:Material", "C:Outer Shell Material") and spec.level == "REQUIRED":
             deterministic = False
         if deterministic or name in MEASUREMENT_ASPECTS or _is_size_aspect(name):
             continue

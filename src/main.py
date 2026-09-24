@@ -93,7 +93,7 @@ def main() -> None:
 
     output_path = args.output or str(DEFAULT_OUTPUT_DIR / pipeline.default_output_filename())
 
-    results, considered, uncovered, failed, held_back = pipeline.run(
+    results, considered, uncovered, unmatched, failed, held_back = pipeline.run(
         master_path=args.master,
         measurements_path=args.measurements,
         template_path=args.template,
@@ -109,7 +109,10 @@ def main() -> None:
 
     total_rows = sum(len(r.rows) for r in results)
     print(f"\n{considered} product(s) processed, {total_rows} listing(s) written, "
-          f"{len(failed) + len(uncovered) + len(held_back)} not listed.")
+          f"{len(failed) + len(uncovered) + len(unmatched) + len(held_back)} not listed.")
+    if unmatched:
+        print(f"\n{len(unmatched)} SKU(s) had NO MASTER FILE ROW and were never even "
+              f"considered — check every Stock Data File for this batch was uploaded: {unmatched}")
     if held_back:
         print(f"\n{len(held_back)} row(s) eBay would refuse were HELD BACK and are NOT in "
               f"the upload file. They are in {held_back.path}:")

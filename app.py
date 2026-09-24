@@ -228,6 +228,10 @@ def _report_text(rep: dict) -> str:
     ]
     if rep["schedule_time"]:
         out += ["", f"Scheduled to go live at {rep['schedule_time']} GMT, not on upload."]
+    if rep["unmatched"]:
+        out += ["", f"NO MASTER FILE ROW, never even considered ({len(rep['unmatched'])}). "
+                    f"Check every Stock Data File for this batch was uploaded:"]
+        out += [f"  - {sku}" for sku in rep["unmatched"]]
     if rep["held_back"]:
         out += ["", f"KEPT OUT of the upload file — eBay would refuse these "
                     f"({len(rep['held_back'])}). The upload file itself is safe as it is:"]
@@ -239,7 +243,7 @@ def _report_text(rep: dict) -> str:
     if rep["uncovered"]:
         out += ["", f"NOT COVERED by any uploaded template ({len(rep['uncovered'])}):"]
         out += [f"  - {sku}" for sku in rep["uncovered"]]
-    if not (rep["held_back"] or rep["failed"] or rep["uncovered"]):
+    if not (rep["unmatched"] or rep["held_back"] or rep["failed"] or rep["uncovered"]):
         out += ["", "Nothing was held back, failed or skipped. Every product listed."]
     return "\n".join(out) + "\n"
 
@@ -251,6 +255,14 @@ def _render_report(rep: dict) -> None:
         f"{rep['considered']} product(s) processed, {rep['total_rows']} listing(s) "
         f"written, {rep['not_listed']} not listed."
     )
+    if rep["unmatched"]:
+        st.error(
+            f"{len(rep['unmatched'])} SKU(s) were in your Orbitvu file but had NO MATCHING "
+            f"ROW in any Stock Data File, so they were never even considered — this usually "
+            f"means a Stock Data File for this batch wasn't uploaded:"
+        )
+        for sku in rep["unmatched"]:
+            st.markdown(f"- **{sku}**")
     if rep["held_back"]:
         st.error(
             f"{len(rep['held_back'])} listing(s) would be refused by eBay and have been "
@@ -469,7 +481,7 @@ if run_clicked:
                 progress_bar.progress(min(max(frac, 0.0), 1.0))
 
         try:
-            results, considered, uncovered, failed, held_back = pipeline.run(
+            results, considered, uncovered, unmatched, failed, held_back = pipeline.run(
                 master_path=master_paths,
                 measurements_path=measurements_paths,
                 template_path=template_paths,
@@ -503,11 +515,12 @@ if run_clicked:
                 "ran_at": datetime.now().strftime("%d.%m.%y %H:%M"),
                 "considered": considered,
                 "total_rows": total_rows,
-                "not_listed": len(failed) + len(uncovered) + len(held_back),
+                "not_listed": len(failed) + len(uncovered) + len(unmatched) + len(held_back),
                 "held_back": list(held_back.reasons),
                 "held_back_path": held_back.path,
                 "failed": list(failed),
                 "uncovered": list(uncovered),
+                "unmatched": list(unmatched),
                 "schedule_time": schedule_time_str,
                 "schedule_missed": schedule_missed,
                 "output_names": ", ".join(Path(r["output_path"]).name for r in persisted),

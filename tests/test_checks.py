@@ -713,6 +713,141 @@ def test_a_slipper_filed_as_homeware_is_still_a_shoe():
           any("LOUNGE SLIPPER" in u for u in asked), True)
 
 
+def test_a_bathrobe_filed_as_homeware_is_still_clothing():
+    """24.09.26. Same shape as the Givenchy slipper, found asking about
+    QTN02-002-072 (a Missoni Home bathrobe): filed as Lifestyle / Bedding and
+    Bathroom, which is homeware to everything downstream, while its own
+    customs Tariff Code (6208910090, chapter 62 — the same chapters as any
+    other garment) says clothing. A sweep of the whole Master File for the
+    same contradiction turned up 8 robes, all under Bedding and Bathroom."""
+    from src import category_mapping, ebay_template, pipeline
+
+    missoni = Product(
+        sku="QTN02-002-072",
+        master={"Category": "Lifestyle", "SubCat2": "Bedding and Bathroom",
+                "Gender": "WOMEN", "Tariff Code": "6208910090",
+                "Clean Title Description": "MISSONI HOME RIVERBERO BATHROBE BEDDING AND BATHROOM"},
+        measurements={})
+    check("a bathrobe filed as homeware is spotted",
+          category_mapping.is_misfiled_robe(missoni), True)
+
+    # A robe named with a space, and one behind "BATH ROBE" as two words.
+    house_robe = Product(sku="X", master={
+        "Category": "Lifestyle", "SubCat2": "Bedding and Bathroom",
+        "Tariff Code": "6208990099",
+        "Clean Title Description": "SOHO HOME HOUSE ROBE BEDDING AND BATHROOM"}, measurements={})
+    check("'HOUSE ROBE' is caught too", category_mapping.is_misfiled_robe(house_robe), True)
+    bath_robe = Product(sku="X", master={
+        "Category": "Lifestyle", "SubCat2": "Bedding and Bathroom",
+        "Tariff Code": "6208910019",
+        "Clean Title Description": "VERSACE BAROCCO BATH ROBE BEDDING AND BATHROOM"}, measurements={})
+    check("'BATH ROBE' is caught too", category_mapping.is_misfiled_robe(bath_robe), True)
+
+    # What it must not catch. A genuine bath mat shares the Missoni's combo
+    # and its brand, but not a clothing tariff chapter.
+    bath_mat = Product(sku="QTN02-002-070", master={
+        "Category": "Lifestyle", "SubCat2": "Bedding and Bathroom",
+        "Tariff Code": "5701909090",
+        "Clean Title Description": "MISSONI HOME OTIL BATH MAT DIA.80 BEDDING AND BATHROOM"},
+        measurements={})
+    check("a genuine homeware item with the same brand and combo is left alone",
+          category_mapping.is_misfiled_robe(bath_mat), False)
+
+    # A real brand in this catalog, "Wardrobe NYC" — WARDROBE must never
+    # read as a robe. ROBE has to be its own word, not a substring.
+    wardrobe_nyc = Product(sku="QTN02-002-737", master={
+        "Category": "Lifestyle", "SubCat2": "Bedding and Bathroom",
+        "Tariff Code": "6110300010",
+        "Clean Title Description": "WARDROBE NYC JACKET AND TROUSER SET"}, measurements={})
+    check("'Wardrobe NYC' is never mistaken for a robe",
+          category_mapping.is_misfiled_robe(wardrobe_nyc), False)
+
+    # A scarf and a hair clip both carry genuine chapter 61/62 tariff codes
+    # while correctly belonging under Accessories, not clothing — tariff
+    # chapter alone is too broad a signal, so the title has to say ROBE too.
+    scarf = Product(sku="QTN02-001-813", master={
+        "Category": "Accessories", "SubCat2": "Scarves", "Tariff Code": "6214200090",
+        "Clean Title Description": "JIL SANDER LOGO LABEL MOHAIR SCARF"}, measurements={})
+    check("a scarf with a clothing tariff code is left alone",
+          category_mapping.is_misfiled_robe(scarf), False)
+
+    # And anything already filed under a clothing Category is untouched.
+    dressing_gown_ready_to_wear = Product(sku="X", master={
+        "Category": "Ready to Wear", "SubCat2": "Robes", "Tariff Code": "6208910090",
+        "Clean Title Description": "SOME BRAND SILK ROBE"}, measurements={})
+    check("a product already filed under a clothing Category is untouched",
+          category_mapping.is_misfiled_robe(dressing_gown_ready_to_wear), False)
+
+    # The combo path is what would drag the bath mat into Nightwear, so a
+    # misfiled robe has to be resolved from its own title instead.
+    check("and it is resolved from its own title, not its combo",
+          category_mapping._needs_its_own_answer(missoni), True)
+    check("while the bath mat keeps the cheap combo path",
+          category_mapping._needs_its_own_answer(bath_mat), False)
+
+    # Template order: nightwear-carrying templates first for the robe,
+    # unchanged for everyone else, nothing dropped.
+    class FakeTemplate:
+        def __init__(self, names):
+            self.categories = [CategorySpec(str(i), n, []) for i, n in enumerate(names)]
+
+    templates = [
+        FakeTemplate(["Bedding > Bathrobes & Dressing Gowns"]),      # homeware
+        FakeTemplate(["Girls > Girls' Clothing"]),                   # kidswear
+        FakeTemplate(["Men's Clothing > Nightwear"]),                # menswear_clothing
+        FakeTemplate(["Lingerie & Nightwear > Nightwear"]),          # womenswear_clothing
+    ]
+    order = pipeline._template_order(missoni, templates)
+    check("templates carrying Nightwear are offered to the robe first",
+          order[0] in (2, 3), True)
+    check("the homeware template is not dropped, only demoted",
+          sorted(order), [0, 1, 2, 3])
+
+    # Real templates: covers_nightwear finds the real "Lingerie & Nightwear >
+    # Nightwear" / "Men's Clothing > Nightwear" categories, and a homeware
+    # template with no Nightwear category correctly answers False.
+    here = Path(__file__).resolve().parent.parent / "data" / "templates"
+    womens = ebay_template.load_json_template(here / "womenswear_clothing.json")
+    mens = ebay_template.load_json_template(here / "menswear_clothing.json")
+    home = ebay_template.load_json_template(here / "homeware.json")
+    check("womenswear_clothing carries Nightwear",
+          category_mapping.covers_nightwear(womens), True)
+    check("menswear_clothing carries Nightwear",
+          category_mapping.covers_nightwear(mens), True)
+    check("homeware does not", category_mapping.covers_nightwear(home), False)
+
+    # The real category the robe should land in offers Robe as an actual
+    # C:Type value — this isn't a fallback bucket, it genuinely fits.
+    nightwear_types = womens.aspects["63855"]["C:Type"].values
+    check("the real Nightwear category offers 'Robe' as a C:Type value",
+          "Robe" in nightwear_types, True)
+
+    # Both sides of the build_mapping/lookup trap, same reasoning as the
+    # slipper test: they read the cache under different keys, so if they
+    # ever disagreed about a product, its mapping would be built under one
+    # key and read back under the other, and it would silently vanish.
+    real_template = EbayTemplate(
+        listing_headers=["*Action", "Custom label (SKU)"],
+        categories=[CategorySpec("63855", "Lingerie & Nightwear > Nightwear", [(3000, "Used")])],
+        aspects={"63855": {}},
+        info_rows=[])
+    fingerprint = category_mapping._template_fingerprint(real_template)
+    combo_only = {category_mapping._combo_key(
+        "Lifestyle", "Bedding and Bathroom", "WOMEN", fingerprint):
+        {"category_id": "10034", "category_name": "Bedding > Bath Mats",
+         "reasoning": "bedding and bathroom"}}
+    check("a combo answer does not decide a misfiled robe",
+          category_mapping.lookup(combo_only, missoni, real_template), None)
+
+    per_product = dict(combo_only)
+    per_product[category_mapping._product_key(missoni.sku, fingerprint)] = {
+        "category_id": "63855", "category_name": "Lingerie & Nightwear > Nightwear",
+        "reasoning": "a bathrobe"}
+    found = category_mapping.lookup(per_product, missoni, real_template)
+    check("its own answer does, and is found where build_mapping wrote it",
+          found and found.get("category_id"), "63855")
+
+
 def test_a_misfiled_slipper_is_named_in_the_report():
     """The routing now handles these, but the Master File row is still
     self-contradictory and the fix belongs there. Named so nobody has to
@@ -1528,7 +1663,7 @@ def test_a_row_ebay_would_refuse_never_reaches_the_upload_file():
 
     originals = (ai_client.call_structured, data_loader.load_products, brand_blurb.build_blurbs)
     ai_client.call_structured = fake_ai
-    data_loader.load_products = lambda *a, **k: [good, bad]
+    data_loader.load_products = lambda *a, **k: ([good, bad], [])
     # build_blurbs takes (brand, tier) pairs since 17.09.26 and returns
     # blurb_key-ed entries; the stub mirrors that so it stays honest.
     brand_blurb.build_blurbs = lambda brands, cache_dir: {
@@ -1537,7 +1672,7 @@ def test_a_row_ebay_would_refuse_never_reaches_the_upload_file():
     try:
         with tempfile.TemporaryDirectory() as d:
             out = pathlib.Path(d) / "Upload.csv"
-            results, considered, uncovered, failed, held = pipeline.run(
+            results, considered, uncovered, unmatched, failed, held = pipeline.run(
                 master_path="unused", measurements_path="unused",
                 template_path=[str(templates_dir / "menswear_shoes.json")],
                 output_path=out, cache_dir=d, force_regenerate=True,
@@ -1572,6 +1707,91 @@ def test_a_row_ebay_would_refuse_never_reaches_the_upload_file():
             report = out.with_name(out.stem + "_checks.txt").read_text()
             check("the report names it in the counts", "1 held back" in report, True)
             check("and lists the SKU", "BAD-001" in report, True)
+    finally:
+        (ai_client.call_structured, data_loader.load_products,
+         brand_blurb.build_blurbs) = originals
+
+
+def test_a_missing_stock_file_is_never_silently_dropped():
+    """24.09.26. BRK02 was left off a run entirely — measurements for it
+    loaded fine, the Stock Data File didn't, and every BRK02 SKU vanished
+    with nothing but a print() in a log nobody was reading. Sammy: "is there
+    a alert we can implement which highlights any skus that dont have data
+    to be created."
+
+    data_loader.load_products now returns the unmatched SKUs instead of only
+    printing them, and pipeline.run threads them through to the exact place
+    uncovered/failed/held_back already surface — the run report and the
+    caller's return tuple — so this can't happen invisibly again."""
+    import tempfile
+    from src import ai_client, brand_blurb, data_loader, pipeline
+
+    templates_dir = pathlib.Path(__file__).resolve().parent.parent / "data" / "templates"
+    if not (templates_dir / "menswear_shoes.json").exists():
+        print("  (skipped: data/templates not present in this checkout)")
+        return
+
+    good = Product(
+        sku="GOOD-001",
+        master={"Brand": "ROA", "Gender": "MEN", "Colour": "Brown",
+                "Category": "Footwear", "SubCat2": "Boots", "Rounded RRP": 395,
+                "Country of Origin": "ITA", "Clean Title Description": "ROA HIKING BOOT"},
+        measurements={"Size": "EU 45", "Description": "Good condition.",
+                      "Images 2D link": "http://a|http://b|http://c"},
+    )
+
+    def fake_ai(system, user, tool_name, input_schema, **kwargs):
+        if tool_name == "pick_category":
+            return {"category_id": "11498", "reasoning": "stub"}
+        props = input_schema["properties"]["item_specifics"]["properties"]
+        required = set(input_schema["properties"]["item_specifics"].get("required", []))
+        specifics = {}
+        for name, spec in props.items():
+            if name not in required:
+                continue
+            if spec.get("type") == "array":
+                specifics[name] = spec["items"]["enum"][:1]
+            elif "enum" in spec:
+                specifics[name] = spec["enum"][0]
+            else:
+                specifics[name] = "Leather"
+        return {
+            "title": "ROA Hiking Boots Brown Suede EU 45 RRP 395",
+            "condition_id": 3000,
+            "condition_description": "Good condition.",
+            "material_summary": "Suede",
+            "item_specifics": specifics,
+        }
+
+    missing = ["BRK02-001-010", "BRK02-001-011"]
+    originals = (ai_client.call_structured, data_loader.load_products, brand_blurb.build_blurbs)
+    ai_client.call_structured = fake_ai
+    data_loader.load_products = lambda *a, **k: ([good], missing)
+    brand_blurb.build_blurbs = lambda brands, cache_dir: {
+        brand_blurb.blurb_key(*(b if isinstance(b, tuple) else (b,))): ""
+        for b in brands}
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            out = pathlib.Path(d) / "Upload.csv"
+            results, considered, uncovered, unmatched, failed, held = pipeline.run(
+                master_path="unused", measurements_path="unused",
+                template_path=[str(templates_dir / "menswear_shoes.json")],
+                output_path=out, cache_dir=d, force_regenerate=True,
+            )
+
+            check("the missing SKUs come back to the caller, not just a print()",
+                  unmatched, missing)
+
+            rows = [tr.rows for tr in results]
+            written = [r["Custom label (SKU)"] for group in rows for r in group]
+            check("the product that DID load still lists normally",
+                  written, ["GOOD-001"])
+
+            report = out.with_name(out.stem + "_checks.txt").read_text()
+            check("the report counts them", "2 skipped: no master file row" in report, True)
+            check("and names them, so the fix is 'upload the missing Stock "
+                  "Data File', not a guessing game",
+                  all(sku in report for sku in missing), True)
     finally:
         (ai_client.call_structured, data_loader.load_products,
          brand_blurb.build_blurbs) = originals

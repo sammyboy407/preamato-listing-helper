@@ -1873,6 +1873,151 @@ def _material_candidates(raw: str) -> list[str]:
     return out
 
 
+# "NUM% NAME" -> normalised to "NAME NUM" so every pair in
+# _material_pct_pairs reads name-then-number regardless of which order the
+# supplier wrote it in ("SHELL 94% VISCOSE 6% ELASTANE" vs "Elastane 3 Wool
+# 15 Viscose 82"). Only swaps 1-3 word names, which is every real fibre name
+# seen in this account's compositions so far.
+_PCT_BEFORE_NAME_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%\s+((?:[A-Za-z]+\s*){1,3})")
+_NAME_THEN_PCT_RE = re.compile(r"([A-Za-z][A-Za-z \-]*?)\s+(\d+(?:\.\d+)?)\s*%?(?=\s|$)")
+
+
+def _material_pct_pairs(raw: str) -> list[tuple[str, float]]:
+    """Every (fibre name, percentage) pair in a composition string, in
+    whatever order the supplier wrote them. Section labels (SHELL/LINING/
+    M:/L:) are stripped first, the same preprocessing as
+    _material_candidates — this only cares which single fibre carries the
+    highest number anywhere in the string, not which side of a shell/lining
+    split it sits on."""
+    text = _MATERIAL_LABEL_RE.sub(" ", str(raw))
+    text = _MATERIAL_SECTION_RE.sub(" ", text)
+    text = _PCT_BEFORE_NAME_RE.sub(lambda m: f"{m.group(2).strip()} {m.group(1)} ", text)
+    pairs = []
+    for m in _NAME_THEN_PCT_RE.finditer(text):
+        name = re.sub(r"\s+", " ", m.group(1)).strip(" -")
+        if name and name.lower() not in MATERIAL_IGNORED:
+            pairs.append((name, float(m.group(2))))
+    return pairs
+
+
+def match_dominant_material(raw, valid_values: list[str] | None) -> str | None:
+    """The single fibre with the highest percentage in a composition
+    string, as one of this category's own values.
+
+    Built for single-value fields — C:Outer Shell Material — that
+    match_materials doesn't answer: that one is for the multi-value,
+    Preferred C:Material field and returns every fibre found, not the
+    dominant one.
+
+    Sammy, 24.09.26: "go with whatever percentage is highest on the
+    composition" — a deliberately simple rule, picked because most
+    compositions here (QTN02-001-545's "Elastane 3 Virgin Wool 15
+    Polyester 100 viscose 82", QTN02-002-169's "Cupro 63 Fabric 37 Lamb
+    Skin 100") carry no SHELL:/LINING: labels at all, so there is no
+    reliable way to know which side of a shell/lining split a number
+    belongs to. Taking the single highest number in the whole string is
+    not always the true outer fabric specifically — a lining recorded at
+    a flat 100% would outrank a three-way shell blend that tops out at
+    82% — but it is the stated rule, applied uniformly, rather than a
+    guess.
+
+    A synonym that still doesn't match this category's own list (e.g.
+    "Lamb Skin" canonicalises to "Lambskin Leather", which bags carry but
+    clothing categories don't) falls back to bare "Leather" before being
+    given up on, since every *-Leather synonym reduces to something a
+    clothing category's Outer Shell Material list does offer.
+
+    Returns None rather than guessing when nothing parses or nothing in
+    the composition matches this category's own value list — a blank
+    Required field is caught and reported downstream; a wrong one is not.
+    """
+    if not valid_values:
+        return None
+    texts = [str(r) for r in (raw if isinstance(raw, (list, tuple)) else [raw]) if r]
+    if not texts:
+        return None
+
+    lower_map = {v.lower(): v for v in valid_values}
+    squash_map = {_squash(v): v for v in valid_values}
+
+    def resolve(canonical: str):
+        hit = (lower_map.get(canonical.lower())
+               or squash_map.get(_squash(canonical))
+               or fuzzy_match(canonical, valid_values, cutoff=0.92))
+        if not hit and canonical.lower().endswith("leather") and canonical.lower() != "leather":
+            hit = lower_map.get("leather") or squash_map.get(_squash("leather"))
+        return hit
+
+    best: tuple[float, str] | None = None
+    for text in texts:
+        for name, pct in _material_pct_pairs(text):
+            canonical = MATERIAL_SYNONYMS.get(name.lower(), name)
+            hit = resolve(canonical)
+            if hit and (best is None or pct > best[0]):
+                best = (pct, hit)
+    if best is None:
+        return None
+
+    # A composition that is a single fibre at 100% gets eBay's own
+    # "100% X" value where the category offers it, mirroring
+    # match_materials' own rule — a real, more specific option buyers
+    # filter on.
+    pct, hit = best
+    if pct == 100:
+        exact = lower_map.get(f"100% {hit}".lower())
+        if exact:
+            return exact
+    return hit
+
+
+def composition_summary(raw) -> str | None:
+    """Every fibre in a composition string, with its percentage, formatted
+    for the buyer-facing description — not narrowed to any category's
+    closed picklist, since free text can hold everything a garment label
+    actually says, not just the one value C:Outer Shell Material has room
+    for.
+
+    Sammy, 24.09.26, on match_dominant_material only ever being able to
+    report one fibre even when a composition genuinely has several worth
+    knowing (QTN02-001-545's "Elastane 3 Virgin Wool 15 Polyester 100
+    viscose 82" reduces to "Polyester" alone once it's squeezed into a
+    single Required value, which reads oddly next to a coat a person would
+    call mostly viscose): "maybe just keep all the compositon info in the
+    descriptions". So the fix isn't smarter shell/lining detection, it's
+    not throwing the rest of the label away — the full breakdown goes into
+    the description text, in whatever order the supplier wrote it, and the
+    single dominant-fibre rule stays exactly as-is for the one eBay field
+    that can only hold one answer.
+
+    Reuses _material_pct_pairs, the same parser match_dominant_material is
+    built on, and the same MATERIAL_SYNONYMS table match_materials reads
+    from, so a buyer sees "Elastane", never "Spandex/Elastane" — but takes
+    every fibre found rather than picking a winner, and isn't limited to a
+    category's own value list, since this is prose, not an aspect.
+
+    Returns None when nothing parses (blank composition, or a string this
+    parser can't read at all), so the caller can fall back to the AI's own
+    summary rather than printing an empty "Material:" line.
+    """
+    texts = [str(r) for r in (raw if isinstance(raw, (list, tuple)) else [raw]) if r]
+    if not texts:
+        return None
+
+    seen = set()
+    parts = []
+    for text in texts:
+        for name, pct in _material_pct_pairs(text):
+            canonical = MATERIAL_SYNONYMS.get(name.lower(), name.title())
+            pct_str = f"{pct:g}%"
+            key = (canonical.lower(), pct_str)
+            if key in seen:
+                continue
+            seen.add(key)
+            parts.append(f"{canonical} {pct_str}")
+
+    return ", ".join(parts) if parts else None
+
+
 def match_materials(raw, valid_values: list[str] | None, limit: int = 6) -> list[str]:
     """Every material named in a composition string, as this category's own
     values. Order is the order they were written, which is the order they

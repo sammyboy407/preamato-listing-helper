@@ -89,6 +89,67 @@ def is_misfiled_footwear(product) -> bool:
     return _looks_like_footwear(product)
 
 
+# Robes filed as homeware.
+#
+# Found 24.09.26 asking about QTN02-002-072 (a Missoni Home bathrobe). Same
+# shape as the footwear slippers: the Master File files bathrobes as
+# Lifestyle / Bedding and Bathroom, which reads as home textiles to
+# everything downstream, while the customs Tariff Code says otherwise — a
+# bathrobe is chapter 61/62, the same chapters as any other garment. A sweep
+# of the whole Master File for (clothing tariff chapter) + (non-clothing
+# Category) turned up 8 robes, all under Lifestyle / Bedding and Bathroom:
+# QTN02-001-916 (Kvadrat x Raf), QTN02-002-069/071/072 (Missoni Home),
+# QTN02-002-509/510 (Soho Home), QTN02-002-686 (Versace).
+#
+# Tariff chapter alone is too broad a signal here — scarves and hair
+# accessories also carry chapter 61/62 codes and are correctly filed under
+# Accessories, not misfiled — so this checks the product's own title for an
+# actual robe word as well. "ROBE" as a bare word (not a substring: it must
+# not fire on "Wardrobe NYC", a real brand in this catalog) or "BATHROBE" or
+# "DRESSING GOWN", combined with a genuine garment tariff chapter.
+#
+# Bedding and Bathroom is not being emptied wholesale: QTN02-002-070 (a
+# Missoni Home bath mat) carries tariff chapter 57 (textile floor
+# coverings), not 61/62, and correctly stays homeware.
+ROBE_TARIFF_PREFIXES = ("61", "62")
+_ROBE_TITLE_RE = re.compile(r"\bBATHROBE\b|\bROBE\b|\bDRESSING\s+GOWN\b", re.IGNORECASE)
+
+
+def _looks_like_robe(product) -> bool:
+    title = str(product.m("Clean Title Description") or "")
+    if not _ROBE_TITLE_RE.search(title):
+        return False
+    tariff = "".join(c for c in str(product.m("Tariff Code") or "") if c.isdigit())
+    return tariff.startswith(ROBE_TARIFF_PREFIXES)
+
+
+ROBE_CLOTHING_CATEGORIES = {"ready to wear", "sleepwear and lingerie"}
+
+
+def is_misfiled_robe(product) -> bool:
+    """A product whose own Category is not a clothing one while its title
+    and its customs Tariff Code both say it is a robe.
+
+    Same narrowness as is_misfiled_footwear: products already filed under a
+    clothing Category are left alone, and this is resolved per product (see
+    _needs_its_own_answer) because the combo it would otherwise be asked at
+    — ("Lifestyle", "Bedding and Bathroom", "WOMEN") — is shared with a
+    genuine bath mat."""
+    if str(product.m("Category") or "").strip().lower() in ROBE_CLOTHING_CATEGORIES:
+        return False
+    return _looks_like_robe(product)
+
+
+def covers_nightwear(template) -> bool:
+    """Whether a template has a Nightwear category at all, so the pipeline
+    can offer a misfiled robe the clothing templates before the homeware
+    one. eBay has no dedicated "Robes" category on this account's
+    templates — "Lingerie & Nightwear > Nightwear" (womenswear) and "Men's
+    Clothing > Nightwear" (menswear) both carry Robe as a real C:Type
+    value, and that's where a robe belongs."""
+    return any("nightwear" in str(c.category_name or "").lower() for c in template.categories)
+
+
 # ---------------------------------------------------------------------------
 # Luggage goes to Suitcases, decided in Python, never by the model.
 #
@@ -338,7 +399,7 @@ def _needs_its_own_answer(product) -> bool:
     read back under the other, and it would silently vanish from the file."""
     if (str(product.m("Category")), str(product.m("SubCat2"))) in AMBIGUOUS_SUBCATS:
         return True
-    return is_misfiled_footwear(product)
+    return is_misfiled_footwear(product) or is_misfiled_robe(product)
 
 
 def build_mapping(

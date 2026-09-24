@@ -146,7 +146,20 @@ def split_image_urls(raw: str | None) -> list[str]:
     return [u.strip() for u in raw.replace("\r", "\n").split("\n") if u.strip()]
 
 
-def load_products(master_path: str | Path | list, measurements_path: str | Path | list) -> list[Product]:
+def load_products(
+    master_path: str | Path | list, measurements_path: str | Path | list
+) -> tuple[list[Product], list[str]]:
+    """Returns (products, unmatched_skus). unmatched_skus is every SKU present
+    in a measurements file with no matching row in any master file — most
+    often a stock file that was never uploaded alongside the measurements
+    for that batch (BRK02, 24.09.26: the measurements loaded fine, the
+    matching Stock Data File wasn't on the run, and every one of its SKUs
+    vanished with nothing but a line in a log nobody was reading).
+
+    Previously only a print() here — invisible in the Streamlit UI, which
+    reads from pipeline.run()'s return values, not stdout. Now returned so
+    the caller can put it wherever failed/uncovered/held_back already show
+    up. The print stays too, for the CLI running with nothing else watching."""
     master = load_master_files(master_path)
     measurements = load_measurements_files(measurements_path)
 
@@ -163,4 +176,4 @@ def load_products(master_path: str | Path | list, measurements_path: str | Path 
         print(f"WARNING: {len(unmatched)} SKU(s) in measurements file(s) have no match in "
               f"the master file(s) and will be skipped: {unmatched}")
 
-    return products
+    return products, unmatched

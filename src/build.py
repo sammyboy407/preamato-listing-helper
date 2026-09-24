@@ -133,6 +133,20 @@ def build_description(
         if value
     ]
 
+    # 24.09.26. Sammy: "maybe just keep all the compositon info in the
+    # descriptions" — the AI's own material_summary is free text with
+    # nothing checking it against the composition it's meant to describe
+    # (the exact gap C:Outer Shell Material had). composition_summary reads
+    # the same two fields match_dominant_material does and prints every
+    # fibre found, not just the one that would win a single-value aspect,
+    # so a shell/lining split that reduces to "Polyester" for the Required
+    # field still shows its viscose lining here. Only falls back to the
+    # AI's summary when the composition doesn't parse to anything.
+    material_summary = (
+        aspect_matching.composition_summary([meas.get("Material"), m.get("Composition")])
+        or ai_result.get("material_summary", "Not Specified")
+    )
+
     department = _gender_possessive(m.get("Gender"))
     # Season and Category (Tier1 Category on the Master File) broken out as
     # their own explicit lines rather than folded into Department — Sammy
@@ -149,7 +163,7 @@ def build_description(
         f"Style: {style}",
         f"Type: {item_type}",
         f"Colour: {colour}",
-        f"Material: {ai_result.get('material_summary', 'Not Specified')}",
+        f"Material: {material_summary}",
         f"Size: {size}",
         *measurement_lines,
         f"Department: {department}",

@@ -151,13 +151,24 @@ def _template_order(product, templates) -> list[int]:
 
     Still only an ordering. Every template is still tried, so a woman's
     cufflinks can still land in Men's Jewellery when that is genuinely the
-    only category that fits."""
+    only category that fits.
+
+    24.09.26: a robe filed as Lifestyle / Bedding and Bathroom gets the same
+    treatment as the misfiled slipper — offered the templates carrying a
+    Nightwear category first, everything else tried after."""
     order = list(range(len(templates)))
     product_audience = category_mapping.product_audience(product.m("Gender"))
 
     def rank(i: int) -> tuple:
-        # A misfiled slipper still meets the shoe templates first.
-        shoe = 0 if (misfiled and category_mapping.covers_footwear(templates[i])) else 1
+        # A misfiled slipper still meets the shoe templates first, and a
+        # misfiled robe still meets the templates carrying Nightwear first
+        # (24.09.26, same shape: Lifestyle / Bedding and Bathroom bathrobes
+        # offered the homeware template before a clothing one ever saw
+        # them).
+        early = 0 if (
+            (misfiled_shoe and category_mapping.covers_footwear(templates[i]))
+            or (misfiled_robe and category_mapping.covers_nightwear(templates[i]))
+        ) else 1
         template_audience = category_mapping.template_audience(templates[i])
         if product_audience in (None, "unisex") or template_audience is None:
             gender = 1                      # nothing to go on, or a neutral template
@@ -165,9 +176,10 @@ def _template_order(product, templates) -> list[int]:
             gender = 0                      # this product's own department
         else:
             gender = 2                      # somebody else's
-        return (shoe, gender, i)
+        return (early, gender, i)
 
-    misfiled = category_mapping.is_misfiled_footwear(product)
+    misfiled_shoe = category_mapping.is_misfiled_footwear(product)
+    misfiled_robe = category_mapping.is_misfiled_robe(product)
     return sorted(order, key=rank)
 
 
@@ -212,19 +224,23 @@ def run(
     combine_output: bool = True,
     photo_qc: bool = False,
     on_progress: ProgressFn = _noop,
-) -> tuple[list[TemplateResult], int, list[str], list[str], "HeldBack"]:
+) -> tuple[list[TemplateResult], int, list[str], list[str], list[str], "HeldBack"]:
     """Runs the full pipeline. Returns (template_results, num_products_considered,
-    uncovered_skus, failed, held_back) — uncovered_skus lists products whose
-    (Category, SubCat2, Gender) doesn't match any category in ANY of the given
-    templates, failed lists "SKU: reason" for every product that was dropped
-    during generation (an unresolvable Required size, an API error that
-    survived its retries), and held_back is the rows eBay would refuse, which
-    are written to their own file instead of the upload file.
+    uncovered_skus, unmatched_skus, failed, held_back) — uncovered_skus lists
+    products whose (Category, SubCat2, Gender) doesn't match any category in
+    ANY of the given templates, unmatched_skus lists SKUs that were in a
+    measurements file but never became a product at all because no master
+    file had a matching row (see data_loader.load_products — most often a
+    stock file that wasn't uploaded on this run), failed lists "SKU: reason"
+    for every product that was dropped during generation (an unresolvable
+    Required size, an API error that survived its retries), and held_back is
+    the rows eBay would refuse, which are written to their own file instead
+    of the upload file.
 
-    Both are returned rather than only logged: on a 6-row test run a skipped
-    SKU is obvious, but on a 295-row batch the log line scrolls away and the
-    run ends on a green "generated 220 listings" with no hint that 75 are
-    missing or which ones. The caller is expected to show them.
+    All of these are returned rather than only logged: on a 6-row test run a
+    skipped SKU is obvious, but on a 295-row batch the log line scrolls away
+    and the run ends on a green "generated 220 listings" with no hint that
+    75 are missing or which ones. The caller is expected to show them.
 
     template_path is optional — pass None/[] to skip uploading a template
     manually and fall back automatically to data/templates/*.json, the
@@ -261,13 +277,19 @@ def run(
             used_default_departments = True
 
     on_progress("Loading source files...", 0.0)
-    products = data_loader.load_products(master_path, measurements_path)
+    products, unmatched_skus = data_loader.load_products(master_path, measurements_path)
     if limit:
         products = products[:limit]
     if not products:
+        detail = (
+            f" {len(unmatched_skus)} SKU(s) were read from the measurements file(s) but matched "
+            f"no master file row: {unmatched_skus}. Check the Stock Data File(s) for this batch "
+            f"were all uploaded." if unmatched_skus else ""
+        )
         raise ValueError(
             "No products matched between the master file(s) and the measurements file(s). "
             "Check that SKUs line up (measurements file's 'Name' column vs master file's 'SKU' column)."
+            + detail
         )
     on_progress(f"{len(products)} products to process.", 0.05)
 
@@ -300,6 +322,17 @@ def run(
     # None of these stop the run. A batch where one row is short should
     # still list the other forty.
     warnings = []
+
+    # 24.09.26, BRK02: a whole Stock Data File left off the run vanished
+    # with no warning anyone actually saw — data_loader.load_products only
+    # printed to a log nobody was reading. Named here, in the same place
+    # and the same way as no_rrp/no_size/bare below, so it can't be missed
+    # the same way again.
+    if unmatched_skus:
+        warnings.append(
+            f"{len(unmatched_skus)} SKU(s) are in the measurements file(s) but have NO MATCHING "
+            f"ROW in any master file, so they were never even considered — check every Stock "
+            f"Data File for this batch was uploaded: {', '.join(unmatched_skus)}")
 
     no_rrp = [p.sku for p in products if not (p.m("Rounded RRP") or 0)]
     if no_rrp:
@@ -385,7 +418,7 @@ def run(
             "None of the matched products fall into a category covered by any given "
             "template — no output file produced.", 1.0
         )
-        return [], 0, uncovered_skus, [], HeldBack()
+        return [], 0, uncovered_skus, unmatched_skus, [], HeldBack()
 
     # (brand, condition tier) rather than brand alone: a brand with both new
     # and preloved stock in one batch needs a paragraph for each, or the new
@@ -628,15 +661,24 @@ def run(
         f"  {len(assignments)} matched a category and were processed",
         f"  {rows_out} listing(s) written to the CSV",
     ]
+    if unmatched_skus:
+        header.append(f"  {len(unmatched_skus)} skipped: no master file row (listed below)")
     if uncovered_skus:
         header.append(f"  {len(uncovered_skus)} skipped: no template covers their category")
     if errors:
         header.append(f"  {len(errors)} skipped: failed during generation (listed below)")
     if held:
         header.append(f"  {len(held)} held back: eBay would refuse them (listed below)")
-    if not uncovered_skus and not errors and not held and rows_out == len(products):
+    if not unmatched_skus and not uncovered_skus and not errors and not held and rows_out == len(products):
         header.append("  Nothing was dropped.")
     header.append("")
+
+    if unmatched_skus:
+        header.append(
+            f"NO MASTER FILE ROW ({len(unmatched_skus)}) — these are NOT in the CSV. Check "
+            f"every Stock Data File for this batch was uploaded:")
+        header.extend(f"  {sku}" for sku in unmatched_skus)
+        header.append("")
 
     if held:
         header.append(
@@ -682,7 +724,7 @@ def run(
 
     on_progress(f"Done — {len(template_results)} output file(s) written.", 1.0)
 
-    return template_results, len(assignments), uncovered_skus, errors, HeldBack(
+    return template_results, len(assignments), uncovered_skus, unmatched_skus, errors, HeldBack(
         skus=held_skus,
         reasons=[(str(row.get("Custom label (SKU)")), rs) for _idx, row, rs in held],
         path=str(held_path) if held_path else None,

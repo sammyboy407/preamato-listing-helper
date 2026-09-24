@@ -1609,6 +1609,181 @@ def test_the_material_is_read_off_the_composition():
     check("Required: the AI backs it up", "C:Material" in multi_required, True)
 
 
+def test_outer_shell_material_takes_the_highest_percentage():
+    """24.09.26. C:Outer Shell Material was AI-guessed, with nothing checking
+    the guess against the composition, which is how QTN02-001-545 (Frankie
+    Shop) went out as "Cotton Blend" on a coat whose real composition —
+    "Elastane 3 Virgin Wool 15 Polyester 100 viscose 82" — names no cotton at
+    all, and QTN02-002-169 (Nour Hammour) went out with the field simply
+    empty, both held back by the NEEDS ATTENTION file.
+
+    Sammy's fix: "go with whatever percentage is highest on the
+    composition". Both real strings below, verbatim."""
+    coat_values = [
+        "100% Cashmere", "100% Silk", "100% Wool", "Cashmere", "Cotton",
+        "Cotton Blend", "Cupro", "Elastane", "Leather", "Linen", "Polyamide",
+        "Polyester", "Silk", "Suede", "Viscose", "Wool",
+    ]
+    check("the highest number in the string wins, even when it isn't the "
+          "fibre a person would call the shell (a flat 100% lining number "
+          "outranks an 82% share of a three-way shell blend) — the stated "
+          "rule, applied uniformly, not a guess about which side of an "
+          "unlabelled composition is the shell",
+          am.match_dominant_material(
+              "Elastane 3 Virgin Wool 15 Polyester 100 viscose 82", coat_values),
+          "Polyester")
+    check("a fibre that names no cotton is never called Cotton Blend — the "
+          "actual bug, for the record",
+          am.match_dominant_material(
+              "Elastane 3 Virgin Wool 15 Polyester 100 viscose 82", coat_values)
+          != "Cotton Blend", True)
+
+    # Nour Hammour: "Lamb Skin" canonicalises to "Lambskin Leather" via
+    # MATERIAL_SYNONYMS, which this category's own list does not carry —
+    # only bare "Leather" — so it has to fall back rather than come back
+    # empty on a Required field.
+    check("a *-Leather synonym this category doesn't offer falls back to "
+          "bare Leather rather than leaving a Required field empty",
+          am.match_dominant_material("Cupro 63 Fabric 37 Lamb Skin 100", coat_values),
+          "Leather")
+
+    # A category that DOES carry the specific synonym keeps it.
+    check("a category that offers the specific synonym gets it, not the "
+          "generic fallback",
+          am.match_dominant_material("Lamb Skin 100", coat_values + ["Lambskin Leather"]),
+          "Lambskin Leather")
+
+    # "NUM% NAME" and "NAME NUM" both parse, and the section labels this
+    # shares with _material_candidates are stripped the same way.
+    check("percent-before-name parses too",
+          am.match_dominant_material("SHELL 94% VISCOSE 6% ELASTANE", coat_values),
+          "Viscose")
+    check("a single fibre at 100% takes eBay's own 100% value, same rule as "
+          "match_materials",
+          am.match_dominant_material("100% SILK", coat_values), "100% Silk")
+    check("but never invented for a category without it",
+          am.match_dominant_material("100% SILK", ["Silk", "Cotton"]), "Silk")
+
+    # Never guesses.
+    check("nothing parses, no guess", am.match_dominant_material("", coat_values), None)
+    check("nothing parses, no guess", am.match_dominant_material(None, coat_values), None)
+    check("no candidate values, no guess",
+          am.match_dominant_material("Cotton 100", []), None)
+    check("a fibre the category doesn't offer at all is never forced onto "
+          "the nearest word",
+          am.match_dominant_material("Cupro 100", ["Cotton", "Silk"]), None)
+    check("a fibre named at a lower share than one the category doesn't "
+          "offer still wins — only resolvable candidates compete",
+          am.match_dominant_material("Cupro 90 Silk 10", ["Silk", "Cotton"]), "Silk")
+
+    # End to end, through the real template, on the real SKUs.
+    from src import content_generator as cg, ebay_template as et
+    from src.data_loader import Product
+    t = et.load_json_template("data/templates/womenswear_clothing.json")
+    spec = t.aspects["63862"]["C:Outer Shell Material"]
+    frankie = Product("QTN02-001-545",
+                       {"Composition": "Elastane 3 Virgin Wool 15 Polyester 100 viscose 82"},
+                       {})
+    check("resolved deterministically for the real SKU",
+          cg._resolve_deterministic("C:Outer Shell Material", frankie, spec), "Polyester")
+    nour = Product("QTN02-002-169", {"Composition": "Cupro 63 Fabric 37 Lamb Skin 100"}, {})
+    check("resolved deterministically for the other real SKU",
+          cg._resolve_deterministic("C:Outer Shell Material", nour, spec), "Leather")
+    blank = Product("X", {"Composition": ""}, {})
+    check("nothing found leaves it to the AI rather than writing an empty cell",
+          cg._resolve_deterministic("C:Outer Shell Material", blank, spec), None)
+
+    # REQUIRED everywhere it appears on coats/jackets, so it needs the AI
+    # backstop the same way C:Material does.
+    _, hybrid_required, _, _ = cg.classify_aspects("63862", t)
+    check("Required: the AI backs it up",
+          "C:Outer Shell Material" in hybrid_required, True)
+
+
+def test_the_description_keeps_every_fibre_not_just_the_dominant_one():
+    """24.09.26, the same conversation as the test above. Flagged that
+    match_dominant_material can only ever report one fibre for the Required
+    C:Outer Shell Material field — QTN02-001-545's own composition reduces
+    to "Polyester" there, even though a person reading the label would
+    probably call the coat mostly viscose. Sammy: "maybe just keep all the
+    compositon info in the descriptions" — not smarter shell/lining
+    detection, just not throwing the rest of the label away where there's
+    room for it."""
+    check("both real strings, every fibre, in the order the supplier wrote "
+          "them, synonym-canonicalised the same way match_materials is",
+          am.composition_summary("Elastane 3 Virgin Wool 15 Polyester 100 viscose 82"),
+          "Elastane 3%, Wool 15%, Polyester 100%, Viscose 82%")
+    check("Lamb Skin canonicalises via the same table match_materials uses — no "
+          "category to fall back against here, so the specific synonym prints "
+          "as-is rather than reducing to bare Leather",
+          am.composition_summary("Cupro 63 Fabric 37 Lamb Skin 100"),
+          "Cupro 63%, Lambskin Leather 100%")
+
+    # Not narrowed to any category's closed list — this is prose, not an
+    # aspect, so a fibre no picklist carries still shows up.
+    check("not filtered by a valid_values list — there isn't one to pass",
+          am.composition_summary("Methyl Methacrylate 100"), None)  # ignored placeholder, not a fibre
+    check("a real but unusual fibre still prints",
+          am.composition_summary("Cupro 100"), "Cupro 100%")
+
+    # Section labels and percent-before-name both parse, same as the
+    # dominant-fibre parser this reuses.
+    check("percent-before-name parses",
+          am.composition_summary("SHELL 94% VISCOSE 6% ELASTANE"),
+          "Viscose 94%, Elastane 6%")
+
+    # A duplicate (name, pct) pair — the same fibre named twice across a
+    # SHELL:/LINING: split that reduces to identical numbers — collapses to
+    # one line rather than repeating itself.
+    check("an exact duplicate pair only prints once",
+          am.composition_summary("SHELL: Cotton 100 LINING: Cotton 100"),
+          "Cotton 100%")
+
+    # Never guesses.
+    check("nothing parses, nothing printed", am.composition_summary(""), None)
+    check("nothing parses, nothing printed", am.composition_summary(None), None)
+    check("a list of sources with nothing usable in either", am.composition_summary([None, ""]), None)
+
+    # Reads both sources build.py passes it, same as match_dominant_material.
+    check("takes a list of sources the same way match_dominant_material does",
+          am.composition_summary([None, "100% Silk"]), "Silk 100%")
+
+    # End to end: the description's Material line uses this, not the AI's
+    # free-text summary, whenever the composition actually parses.
+    from src import build, ebay_template as et
+    from src.data_loader import Product
+    templates_dir = Path(__file__).resolve().parent.parent / "data" / "templates"
+    womenswear = templates_dir / "womenswear_clothing.json"
+    if not womenswear.exists():
+        print("  (skipped description check: data/templates not present in this checkout)")
+        return
+    template = et.load_template(womenswear)
+    category = template.category_by_id("63862")
+
+    def material_line(master, ai_summary):
+        product = Product(
+            sku="T", master={"Brand": "FRANKIE SHOP", "Gender": "WOMEN", "Colour": "Brown",
+                             "Rounded RRP": 445, "Season": "AW25", "Category": "Clothing",
+                             **master},
+            measurements={"Size": "M", "Description": "Good condition."})
+        ai_result = {"condition_description": "Good condition.", "material_summary": ai_summary,
+                     "item_specifics": {}, "style": "Coat", "type": "Coat"}
+        text = build.build_description(product, ai_result, category, template, {})
+        for line in text.replace("<br>", "").splitlines():
+            if line.strip().startswith("Material:"):
+                return line.strip().rstrip()
+        return None
+
+    check("the description shows the full composition, not the single "
+          "dominant fibre the Required aspect is stuck with",
+          material_line({"Composition": "Elastane 3 Virgin Wool 15 Polyester 100 viscose 82"},
+                         "Polyester"),
+          "Material: Elastane 3%, Wool 15%, Polyester 100%, Viscose 82%")
+    check("falls back to the AI's own summary when the composition doesn't parse",
+          material_line({"Composition": ""}, "Cotton Blend"),
+          "Material: Cotton Blend")
+
+
 def test_the_title_says_who_the_item_is_for():
     """Sammy, 06.09.26: "we need to add Mens Womens after each brand in the
     title, this is optimal for ebay search results".
