@@ -848,6 +848,109 @@ def test_a_bathrobe_filed_as_homeware_is_still_clothing():
           found and found.get("category_id"), "63855")
 
 
+def test_the_per_product_prompt_actually_explains_robes():
+    """24.09.26, later the same day fix38 shipped. Checked QTN02-002-072
+    directly against the real womenswear_clothing template: is_misfiled_robe
+    correctly True, "63855: Lingerie & Nightwear > Nightwear" genuinely one
+    of the 35 candidates the per-product path offers it. Both true, and it
+    still came back NOT COVERED on Sammy's real run.
+
+    The thing the test above never checked: SYSTEM_PER_PRODUCT, the actual
+    prompt this path sends, was 100% footwear heel-height guidance with not
+    one word about robes. Written for is_misfiled_footwear, never touched
+    when is_misfiled_robe was bolted onto the same code path in fix37. A
+    model handed 35 mostly-unrelated lingerie categories and zero reason to
+    connect "Bedding and Bathroom" to "Nightwear" saying NONE isn't a wiring
+    bug, it's a prompt that was never asked the question.
+
+    Fixed by rewriting SYSTEM_PER_PRODUCT to cover both cases this path
+    actually serves. This test would have failed before that fix and
+    catches it going forward: the stub AI below only answers correctly when
+    the system prompt it's handed actually mentions robes, exactly
+    mirroring what a real model needs to succeed."""
+    from src import ai_client, category_mapping as cm, ebay_template as et
+    import tempfile
+
+    check("the prompt now actually mentions robes/dressing gowns, not just footwear",
+          any(w in cm.SYSTEM_PER_PRODUCT.lower() for w in ("robe", "dressing gown")), True)
+    check("and keeps the footwear guidance that was already there",
+          "heel" in cm.SYSTEM_PER_PRODUCT.lower(), True)
+
+    here = Path(__file__).resolve().parent.parent / "data" / "templates"
+    womens = et.load_json_template(here / "womenswear_clothing.json")
+    missoni = Product(
+        sku="QTN02-002-072",
+        master={"Category": "Lifestyle", "SubCat2": "Bedding and Bathroom",
+                "Gender": "WOMEN", "Tariff Code": "6208910090",
+                "Clean Title Description": "MISSONI HOME RIVERBERO BATHROBE BEDDING AND BATHROOM"},
+        measurements={})
+
+    allowed = cm.eligible_categories("WOMEN", womens)
+    check("Nightwear is genuinely offered as a candidate, not the thing "
+          "actually missing here",
+          "63855" in [c.category_id for c in allowed], True)
+
+    def stub_ai_that_needs_the_guidance(system, user, tool_name, input_schema, **kwargs):
+        # A stand-in for what an under-briefed model actually did: with no
+        # reason to connect a homeware label to Nightwear, say NONE. Only
+        # answers Nightwear once the prompt actually explains robes —
+        # exactly the condition that changed.
+        if not any(w in system.lower() for w in ("robe", "dressing gown")):
+            return {"category_id": "NONE", "reasoning": "no candidate looks like a bathrobe"}
+        return {"category_id": "63855", "reasoning": "a bathrobe filed as homeware"}
+
+    original = ai_client.call_structured
+    ai_client.call_structured = stub_ai_that_needs_the_guidance
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            cache_path = Path(d) / "cat_cache.json"
+            cache = cm.build_mapping([missoni], womens, cache_path)
+            found = cm.lookup(cache, missoni, womens)
+            check("resolves to Nightwear now the prompt actually explains robes",
+                  found and found.get("category_id"), "63855")
+    finally:
+        ai_client.call_structured = original
+
+
+def test_the_category_mapping_cache_is_versioned():
+    """The gap that let the bug above hide: build_mapping's cache had no
+    version stamp at all, only the template's own category-ID fingerprint.
+    A category_id: None answer written under an old, under-briefed prompt
+    would sit in cache/category_mapping_N.json forever — "is this key in
+    the cache" is the only check build_mapping ever makes, never "was this
+    computed under logic still in effect" — surviving every future code fix
+    silently, the exact same trap content_generator.CACHE_VERSION already
+    exists to avoid for sizing/material resolution.
+
+    CACHE_VERSION now does the same job here. This test doesn't care what
+    the current value is, only that changing it changes every cache key, so
+    the next person who touches SYSTEM_PER_PRODUCT or SYSTEM_COMBO and
+    forgets to bump it has something other than a live customer batch
+    telling them."""
+    from src import category_mapping as cm
+
+    real_template = EbayTemplate(
+        listing_headers=["*Action", "Custom label (SKU)"],
+        categories=[CategorySpec("63855", "Lingerie & Nightwear > Nightwear", [(3000, "Used")])],
+        aspects={"63855": {}},
+        info_rows=[])
+
+    original_version = cm.CACHE_VERSION
+    try:
+        cm.CACHE_VERSION = "test-a"
+        fp_a = cm._template_fingerprint(real_template)
+        cm.CACHE_VERSION = "test-b"
+        fp_b = cm._template_fingerprint(real_template)
+        check("the same template fingerprints differently across a version bump",
+              fp_a != fp_b, True)
+        check("which changes every combo and product cache key derived from it",
+              (cm._combo_key("Lifestyle", "Bedding and Bathroom", "WOMEN", fp_a)
+               != cm._combo_key("Lifestyle", "Bedding and Bathroom", "WOMEN", fp_b)),
+              True)
+    finally:
+        cm.CACHE_VERSION = original_version
+
+
 def test_a_misfiled_slipper_is_named_in_the_report():
     """The routing now handles these, but the Master File row is still
     self-contradictory and the fix belongs there. Named so nobody has to

@@ -338,27 +338,59 @@ SYSTEM_COMBO = (
 SYSTEM_PER_PRODUCT = (
     "You are matching one specific product from a preloved designer fashion reseller's "
     "internal catalog to the correct eBay category, choosing only from a short list of "
-    "candidates. This product's internal SubCat2 label alone is not a reliable signal — "
-    "it's used for a mix of item styles that map to different eBay categories. Base your "
-    "answer on the product's actual title: recognise real footwear conventions (e.g. a bare "
-    "2-3 digit number after a shoe's model name is very often a heel height in millimetres, "
-    "signalling a heeled shoe even with no literal word 'heel' in the title; 'FLAT'/'BALLET'/"
-    "'BALLERINA' signal a flat shoe; a named silhouette you recognise as a heeled style — e.g. "
-    "a court shoe, stiletto, slingback pump — should be treated as heeled even without an "
-    "explicit heel-height number). If you genuinely can't tell, pick the more general/likely "
-    "candidate rather than guessing wildly. If none of the candidates fit at all, say so."
+    "candidates. This product's internal Category/SubCat2 labels alone are not a reliable "
+    "signal — either they're used for a mix of item styles that map to different eBay "
+    "categories, or (see the robes/dressing gowns case below) the internal Category is a "
+    "homeware department even though the item itself is a genuine garment. Base your "
+    "answer on the product's actual title.\n\n"
+    "Footwear: recognise real footwear conventions (e.g. a bare 2-3 digit number after a "
+    "shoe's model name is very often a heel height in millimetres, signalling a heeled shoe "
+    "even with no literal word 'heel' in the title; 'FLAT'/'BALLET'/'BALLERINA' signal a "
+    "flat shoe; a named silhouette you recognise as a heeled style — e.g. a court shoe, "
+    "stiletto, slingback pump — should be treated as heeled even without an explicit "
+    "heel-height number).\n\n"
+    "Robes/dressing gowns: our internal system files these under a homeware label (e.g. "
+    "'Bedding and Bathroom') even though eBay treats them as a garment. If the title names "
+    "a robe, bathrobe, or dressing gown, pick a Nightwear/Sleepwear candidate if one is "
+    "offered, even though the internal Category/SubCat2 say homeware — don't let a homeware "
+    "internal label talk you out of a real Nightwear match that's sitting right there in "
+    "the candidate list.\n\n"
+    "If you genuinely can't tell, pick the more general/likely candidate rather than "
+    "guessing wildly. If none of the candidates fit at all, say so."
 )
 
 
+# Mixed into every cache key alongside the template fingerprint below — see
+# _template_fingerprint. Bump this whenever SYSTEM_COMBO, SYSTEM_PER_PRODUCT,
+# _needs_its_own_answer, eligible_categories or gender_conflict change in a
+# way that could change an answer, exactly the same discipline
+# content_generator.CACHE_VERSION already applies to sizing/material
+# resolution — this cache had none until now.
+#
+# 24.09.26: QTN02-002-072 was correctly flagged misfiled and correctly
+# offered "Lingerie & Nightwear > Nightwear" as one of 35 real candidates —
+# checked directly, both true — and still came back NOT COVERED on a real
+# run, because SYSTEM_PER_PRODUCT was 100% footwear heel-height guidance
+# with not one word about robes (written for is_misfiled_footwear, never
+# updated when is_misfiled_robe was added on the same code path). The
+# per-product cache has no version stamp at all — a category_id: None
+# ("NONE, no reasonable fit") answer written under the old prompt would
+# have sat in cache/category_mapping_N.json forever, surviving every future
+# code fix, since build_mapping only ever checks "is this key in the
+# cache", never "was it computed under prompt logic still in effect".
+CACHE_VERSION = "v2"
+
+
 def _template_fingerprint(template: ebay_template.EbayTemplate) -> str:
-    """A short hash of exactly which categories this template covers. Mixed
-    into cache keys so switching to a template with a different category
-    selection can never reuse a stale mapping from a previous template —
-    without this, a cached category_id not present in the new template
-    would resolve to None downstream and crash, or worse, a coincidentally
-    still-valid-looking ID could mask a mismatch."""
+    """A short hash of exactly which categories this template covers, plus
+    CACHE_VERSION (see above). Mixed into cache keys so switching to a
+    template with a different category selection, or shipping a matching-
+    logic fix, can never reuse a stale mapping from before either change —
+    without the template part, a cached category_id not present in the new
+    template would resolve to None downstream and crash, or worse, a
+    coincidentally still-valid-looking ID could mask a mismatch."""
     ids = ",".join(sorted(c.category_id for c in template.categories))
-    return hashlib.sha256(ids.encode()).hexdigest()[:12]
+    return hashlib.sha256(f"{CACHE_VERSION}::{ids}".encode()).hexdigest()[:12]
 
 
 def _combo_key(category: str, subcat2: str, gender: str, template_fp: str) -> str:
