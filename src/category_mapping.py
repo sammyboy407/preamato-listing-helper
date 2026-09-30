@@ -43,6 +43,25 @@ AMBIGUOUS_SUBCATS = {
     # RAFFIA THONG MULE is a heel; VALENTINO BOWOW 75 METALLIC LTHR SANDAL
     # MULE is a sandal), which is what per-product resolution reads.
     ("Footwear", "Mules"),
+    # Added 30.09.26. A 117-row batch dropped 2 products at combo level: a
+    # POLS POTTEN candle holder and a SELETTI candlestick, both filed
+    # ("Lifestyle", "Candles and Home Fragrance"). Checked directly: both
+    # "Candles & Tea Lights" (46782, actual candles) and "Candle & Tea Light
+    # Holders" (16102, what these two actually are) are genuinely offered as
+    # candidates for that combo -- the model picked the more literal reading
+    # of the SubCat2 name for the whole bucket, which is right for an actual
+    # candle and wrong for a holder sharing the same internal label. Each
+    # product's own title says which one it is.
+    ("Lifestyle", "Candles and Home Fragrance"),
+    # Same batch, worse version of the same problem: 9 products dropped as
+    # NOT COVERED, all filed ("Lifestyle", "Furniture") -- POLS POTTEN,
+    # FLOS, QEEBOO and TOM DIXON pieces. The homeware template alone offers
+    # 30+ genuinely different "Furniture > ..." categories (Stools, Tables,
+    # Cabinets, Sofas, Bookcases, TV Stands...), so asked once for the whole
+    # "Furniture" bucket the model can't choose -- there is no single right
+    # answer for "Furniture" the way there sometimes is for a narrower
+    # SubCat2, it needs each product's own title every time.
+    ("Lifestyle", "Furniture"),
 }
 
 # Footwear that the Master File does not file as footwear.
@@ -378,7 +397,16 @@ SYSTEM_PER_PRODUCT = (
 # have sat in cache/category_mapping_N.json forever, surviving every future
 # code fix, since build_mapping only ever checks "is this key in the
 # cache", never "was it computed under prompt logic still in effect".
-CACHE_VERSION = "v2"
+#
+# 30.09.26: bumped again for the two new AMBIGUOUS_SUBCATS entries above
+# (candles vs. candle holders, and Furniture) — _needs_its_own_answer is
+# on the documented "bump whenever this changes" list right above. Not
+# just box-ticking here either: without the bump, every other SKU in this
+# account still carries its OLD per-product/combo cache entries under the
+# OLD template fingerprint, and a mixed-version cache file is exactly the
+# kind of thing that's hard to reason about later. One clean fingerprint
+# change, everything gets asked again once, done.
+CACHE_VERSION = "v3"
 
 
 def _template_fingerprint(template: ebay_template.EbayTemplate) -> str:

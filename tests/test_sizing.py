@@ -2586,6 +2586,46 @@ def test_sm_is_a_small_and_s_slash_m_is_a_pair():
     assert am.match_size("S/M", _WOMENS_SIZE_LIST) == "S/M"
 
 
+def test_a_size_printed_twice_on_one_label_resolves_to_the_letter():
+    """30.09.26: four SKUs in one batch failed with a size like "M/38" or
+    "XS/TP" that fuzzy-matches nothing on the real picklist. Neither is a
+    genuine eBay range pair (those are letter/letter only -- S/M, M/L,
+    L/XL -- see _WOMENS_SIZE_LIST and SIZE_ALIASES's slash-preserving
+    key). Each is one brand printing the same single size twice: a letter
+    plus its continental number (Prada-style "S/36", "M/38" -- UK S is EU
+    36, UK M is EU 38), or a letter plus a foreign synonym ("XS/TP" -- TP
+    is French "Tres Petit", the same XS). _WOMENS_SIZE_LIST only carries
+    the MARKED continental forms (EU 36, EU 38), not bare "36"/"38", so
+    the bare number half is never independently valid here and the letter
+    half -- already a real value on its own -- is what should come back."""
+    for raw, want in [("M/38", "M"), ("S/36", "S"), ("XS/TP", "XS")]:
+        got = am.match_size(raw, _WOMENS_SIZE_LIST)
+        assert got == want, f"{raw!r} -> {got!r}, wanted {want!r}"
+
+
+def test_a_redundant_second_half_is_only_dropped_when_it_is_not_its_own_valid_size():
+    # The safety net for the case above: if the number after the slash is
+    # ALSO one of eBay's real values on this particular category's list
+    # (some categories carry bare continental numbers unmarked -- see
+    # PREAMATO_CLOTHING_SIZE_MARKING.md), "S/36" stops being unambiguous --
+    # it could genuinely be a range from S to a real, different size "36",
+    # and picking S would be exactly the kind of guess this codebase
+    # refuses to make everywhere else sizing is resolved. Left unresolved
+    # for a human to look at, same as before this fix existed.
+    sizes_with_a_bare_continental_number = _WOMENS_SIZE_LIST + ["36"]
+    assert am.match_size("S/36", sizes_with_a_bare_continental_number) is None
+
+
+def test_a_genuine_two_letter_range_is_still_never_collapsed_to_one_size():
+    # Same guard from the other direction: even when the range itself
+    # isn't a literal value on this category's list (so the plain
+    # fuzzy_match pass above doesn't already catch it), a right-hand side
+    # that is itself a real size on the list blocks the guess -- "S/M"
+    # must never quietly become "S".
+    letters_only = ["XS", "S", "M", "L", "XL"]
+    assert am.match_size("S/M", letters_only) is None
+
+
 def test_numeric_and_marked_sizes_are_not_touched_by_the_alias_table():
     for raw in ["UK 10", "EU 36", "IT 42", "8", "10"]:
         assert am._size_alias_key(raw) not in am.SIZE_ALIASES

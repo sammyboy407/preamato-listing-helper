@@ -654,8 +654,20 @@ def classify_aspects(
         # something (24.09.26: this is what stopped Outer Shell Material
         # being AI-guessed as "Cotton Blend" on an 82% viscose coat with no
         # cotton in it at all).
+        #
+        # C:Type joined this list 24.09.26. It's resolved from SubCat2 (see
+        # _resolve_deterministic), which works when SubCat2 fuzzy-matches
+        # the category's own Type list or the title names a recognised
+        # style. QTN02-002-072, a Missoni Home bathrobe, was neither: its
+        # SubCat2 is "Bedding and Bathroom" (our internal homeware label),
+        # so the deterministic path came up empty on Nightwear's Type,
+        # which is Required. The title-pattern fix above (a Robe pattern in
+        # aspect_matching's _TYPE_TITLE_PATTERNS) catches this exact case,
+        # but the AI backstop is the safety net for whatever the next one
+        # is — same rule as Material: the deterministic value overwrites
+        # the AI's guess whenever the parse actually found something.
         deterministic = name in DETERMINISTIC_ASPECTS
-        if deterministic and name in ("C:Material", "C:Outer Shell Material") and spec.level == "REQUIRED":
+        if deterministic and name in ("C:Material", "C:Outer Shell Material", "C:Type") and spec.level == "REQUIRED":
             deterministic = False
         if deterministic or name in MEASUREMENT_ASPECTS or _is_size_aspect(name):
             continue
@@ -1261,11 +1273,28 @@ def generate_for_product(
     # (error 21919309), and the cost of being wrong is a listing that does
     # not exist. So any aspect eBay says is single keeps its first valid
     # value and drops the rest, whatever produced them.
+    #
+    # 30.09.26: this guard was blind to C:Material and C:Outer Shell
+    # Material whenever they took the pure-deterministic path (PREFERRED,
+    # not REQUIRED — see the deterministic/REQUIRED split above). Those
+    # never go through classify_aspects at all, so enum_specs/hybrid_
+    # specs/multi_specs/skipped never get an entry for them and `spec` came
+    # back None here — the exact "spec is None" branch that was meant to
+    # mean "this aspect isn't on the template", not "this template's own
+    # answer is sitting one lookup away." Four real listings went out with
+    # a pipe-joined Material and were refused with error 21919309 — every
+    # one of them a homeware category (Curtains, Tableware, Furniture...)
+    # where C:Material is real but explicitly single-value, which
+    # match_materials's own docstring assumed never happens for this
+    # field. `aspects` (this category's complete aspect map, keyed by
+    # every name it defines — not just the ones classify_aspects routed
+    # somewhere) is the fallback: it has the real answer for exactly the
+    # aspects the other four dicts don't.
     for name, value in list(specifics.items()):
         if not isinstance(value, str) or "|" not in value:
             continue
         spec = (enum_specs.get(name) or hybrid_specs.get(name)
-                or multi_specs.get(name) or skipped.get(name))
+                or multi_specs.get(name) or skipped.get(name) or aspects.get(name))
         if spec is None or _is_multi_select(name, spec):
             continue
         parts = [p.strip() for p in value.split("|") if p.strip()]

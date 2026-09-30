@@ -951,6 +951,211 @@ def test_the_category_mapping_cache_is_versioned():
         cm.CACHE_VERSION = original_version
 
 
+def test_a_bathrobe_gets_a_real_type_from_its_own_title():
+    """Same SKU as the two tests above, next bug down the pipeline. Once
+    fix39 correctly routed QTN02-002-072 (a Missoni Home bathrobe) to
+    Nightwear (63855), it came back held out of the upload with "C:Type is
+    required by eBay for this category but is empty" instead.
+
+    C:Type is resolved deterministically from SubCat2 (see
+    _resolve_deterministic in content_generator.py). This product's SubCat2
+    is "Bedding and Bathroom" — our internal homeware label, the same one
+    fix39 taught category_mapping to see past for the category itself — so
+    it fuzzy-matches nothing in Nightwear's real Type list (Bodysuit,
+    Dress, Gown, ... Robe, Robe & Gown Set, Sleep Shorts). The deterministic
+    resolver falls back to the product's own title via
+    match_type_from_title, but nothing in _TYPE_TITLE_PATTERNS recognised
+    "bathrobe" or "dressing gown" as Robe, so that came back empty too.
+
+    Fixed with a Robe pattern in _TYPE_TITLE_PATTERNS. "\\brobe\\b" alone
+    would miss "bathrobe" (no word boundary before "robe" inside it), so
+    "bathrobe" and "dressing gown" are matched explicitly too."""
+    from src import aspect_matching as am
+
+    nightwear_types = ["Bodysuit", "Dress", "Gown", "Lounge Pants", "Lounge Set",
+                        "Nightshirt", "One Piece", "Pyjama Pants", "Pyjama Set",
+                        "Pyjama Top", "Robe", "Robe & Gown Set", "Sleep Shorts"]
+
+    check("a bathrobe in the title resolves to Robe",
+          am.match_type_from_title(
+              "MISSONI HOME RIVERBERO BATHROBE BEDDING AND BATHROOM", nightwear_types),
+          "Robe")
+    check("so does a dressing gown, spelled either way",
+          am.match_type_from_title("SILK DRESSING GOWN", nightwear_types), "Robe")
+    check("and a plain robe not compounded into another word",
+          am.match_type_from_title("SATIN ROBE WITH BELT", nightwear_types), "Robe")
+    check("but a word that merely contains \"robe\" isn't dressed up as one",
+          am.match_type_from_title("WARDROBE ORGANISER SET", nightwear_types), None)
+    check("existing category coverage (a plain tee) is untouched",
+          am.match_type_from_title("COTTON CREW NECK TEE", ["T-Shirt", "Polo"]), "T-Shirt")
+
+
+def test_a_required_type_with_no_deterministic_answer_gets_an_ai_backstop():
+    """The gap the bathrobe fell into before the title-pattern fix above,
+    and the safety net for whatever the next one is. C:Material and C:Outer
+    Shell Material already get this treatment (see classify_aspects in
+    content_generator.py): when they're Required, they're ALSO handed to
+    the AI as a backstop, because a composition or a title can fail to
+    resolve one, and a Required field left empty holds the whole row out of
+    the upload file. C:Type had no such backstop — its deterministic
+    resolver was the only chance it got.
+
+    This test doesn't stub the AI; it checks the routing decision itself:
+    a Required C:Type that classify_aspects would previously skip entirely
+    (because it's in DETERMINISTIC_ASPECTS) now reaches enum_specs, so the
+    AI is asked and the enum-validation step downstream guarantees a real
+    value even if the deterministic parse comes up empty. A non-Required
+    C:Type is left exactly as before — deterministic only, blank is fine
+    for those."""
+    from src import content_generator as cg
+
+    required_type_template = make_template({
+        "C:Type": AspectSpec("C:Type", "REQUIRED", ["Bodysuit", "Robe", "Gown"], multi=False),
+    })
+    optional_type_template = make_template({
+        "C:Type": AspectSpec("C:Type", "OPTIONAL", ["Bodysuit", "Robe", "Gown"], multi=False),
+    })
+
+    enum_specs, hybrid_specs, multi_specs, skipped = cg.classify_aspects("63864", required_type_template)
+    check("a Required C:Type with no deterministic backstop was previously "
+          "just skipped -- it now reaches the AI (enum_specs, this list "
+          "being short)",
+          "C:Type" in enum_specs or "C:Type" in hybrid_specs, True)
+    check("and is not left in skipped, where it would silently stay blank",
+          "C:Type" in skipped, False)
+
+    enum_specs2, hybrid_specs2, multi_specs2, skipped2 = cg.classify_aspects("63864", optional_type_template)
+    check("an OPTIONAL C:Type keeps the old deterministic-only behaviour -- "
+          "blank is an acceptable answer there, no need to spend an AI call",
+          "C:Type" in enum_specs2 or "C:Type" in hybrid_specs2, False)
+
+
+def test_a_candle_holder_is_not_asked_for_at_the_same_combo_as_a_candle():
+    """30.09.26, same batch as the two tests above, a different SubCat2.
+    ("Lifestyle", "Candles and Home Fragrance") was NOT in AMBIGUOUS_SUBCATS,
+    so a POLS POTTEN candle holder and a SELETTI candlestick were asked
+    about once, at combo level, alongside every actual candle sharing that
+    SubCat2 -- and both came back mapped to "Candles & Tea Lights" (46782),
+    a category whose own C:Type list (Advent Candle, Ball Candle, ... Tea
+    Light, Votive Candle) has nothing that describes a holder at all. The
+    right category, "Candle & Tea Light Holders" (16102), with "Candle
+    Holder" and "Candlestick" right there in its own C:Type list, was a
+    genuinely offered candidate the whole time -- the combo path just never
+    got to see either product's title to tell them apart."""
+    from src import category_mapping as cm, ebay_template as et
+
+    holder = Product(sku="QTN02-002-232",
+                      master={"Category": "Lifestyle", "SubCat2": "Candles and Home Fragrance",
+                              "Gender": "WOMEN",
+                              "Clean Title Description": "POLS POTTEN BEADS CANDLE HOLDER"},
+                      measurements={})
+
+    check("now resolved per product, not lumped in with every candle",
+          cm._needs_its_own_answer(holder), True)
+
+    here = Path(__file__).resolve().parent.parent / "data" / "templates"
+    homeware = et.load_json_template(here / "homeware.json")
+    allowed = [c.category_id for c in cm.eligible_categories("WOMEN", homeware)]
+    check("Candle & Tea Light Holders is genuinely offered, not the thing missing",
+          "16102" in allowed, True)
+    check("and so is the wrong category this combo used to get stuck on",
+          "46782" in allowed, True)
+
+
+def test_furniture_is_too_broad_a_subcat_for_one_shared_answer():
+    """Worse version of the same problem, same batch: nine products filed
+    ("Lifestyle", "Furniture") all came back NOT COVERED. The homeware
+    template alone offers 30+ real "Furniture > ..." categories -- Stools,
+    Tables, Cabinets, Sofas, Bookcases, TV Stands -- so asked once for the
+    whole bucket the model has no single right answer to give and (as
+    NOT COVERED shows) correctly refuses to force one. Each product's own
+    title is the only thing that can settle it."""
+    from src import category_mapping as cm, ebay_template as et
+
+    stool = Product(sku="QTN02-002-313",
+                     master={"Category": "Lifestyle", "SubCat2": "Furniture",
+                              "Gender": "WOMEN",
+                              "Clean Title Description": "QEEBOO STOOL"},
+                     measurements={})
+
+    check("Furniture is resolved per product now, not as one shared guess",
+          cm._needs_its_own_answer(stool), True)
+
+    here = Path(__file__).resolve().parent.parent / "data" / "templates"
+    homeware = et.load_json_template(here / "homeware.json")
+    allowed = [c.category_name for c in cm.eligible_categories("WOMEN", homeware)]
+    furniture_candidates = [n for n in allowed if n.startswith("Furniture")]
+    check("genuinely more than one real Furniture category on offer -- "
+          "there is no single answer a combo-level ask could give",
+          len(furniture_candidates) > 1, True)
+
+
+def test_a_single_value_material_field_never_gets_pipe_joined():
+    """30.09.26, same day, a different failure mode: four real listings
+    refused by eBay with error 21919309, "Material should contain only one
+    value" -- all in homeware categories (Curtains, Tableware, Furniture...)
+    where C:Material is genuinely real but single-value, not the usual
+    multi-value Preferred field match_materials was written for.
+
+    The account already has a cardinality guard for exactly this error
+    (content_generator.generate_for_product's "Last guard on cardinality"),
+    but it only ever looks up an aspect's spec in enum_specs/hybrid_specs/
+    multi_specs/skipped -- the four dicts classify_aspects fills in. C:
+    Material and C:Outer Shell Material are DETERMINISTIC_ASPECTS, and
+    whenever they're not REQUIRED they never reach classify_aspects at all
+    (see the deterministic/REQUIRED split in generate_for_product), so the
+    guard's spec lookup came back None and it skipped them -- silently, on
+    every single-value Material category there is, the exact 24 confirmed
+    live in data/templates/*.json (multi: False, mostly PREFERRED not
+    REQUIRED).
+
+    End to end against the real homeware template: 79654 (Home Decor >
+    Photo & Picture Frames) has C:Material as PREFERRED, multi=False, real
+    eBay values including "Wood" and "Metal". A composition naming both
+    fibres must NOT come out pipe-joined."""
+    from src import ai_client, content_generator, ebay_template as et
+    import tempfile
+
+    here = Path(__file__).resolve().parent.parent / "data" / "templates"
+    homeware = et.load_json_template(here / "homeware.json")
+    frame_spec = homeware.aspects["79654"]["C:Material"]
+    check("this category's own C:Material is confirmed single-value",
+          frame_spec.multi, False)
+    check("and Preferred, not Required -- the deterministic-skip path this bug lived in",
+          frame_spec.level, "PREFERRED")
+    cat = next(c for c in homeware.categories if c.category_id == "79654")
+
+    frame = Product(
+        sku="QTN02-TEST-FRAME",
+        master={"Category": "Lifestyle", "SubCat2": "Photo Frames", "Gender": "WOMEN",
+                "Brand": "POLS POTTEN", "Clean Title Description": "POLS POTTEN PHOTO FRAME",
+                "Composition": "Wood 60 Metal 40", "Country of Origin": "", "Tariff Code": ""},
+        measurements={"Material": "Wood 60 Metal 40",
+                      "Description": "Preloved item in good condition."})
+
+    def fake_ai(system, user, tool_name, input_schema, **kwargs):
+        out = {"title": "POLS POTTEN Photo Frame RRP 50", "condition_id": 3000,
+               "condition_description": "Good condition."}
+        if "item_specifics" in input_schema.get("properties", {}):
+            out["item_specifics"] = {}
+        return out
+
+    original = ai_client.call_structured
+    ai_client.call_structured = fake_ai
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            result = content_generator.generate_for_product(
+                frame, cat, homeware, d, force=True, read_aspects_from_image=False)
+    finally:
+        ai_client.call_structured = original
+
+    got = result["item_specifics"].get("C:Material")
+    check("a two-fibre composition on a single-value field keeps one fibre, not both",
+          "|" in str(got), False)
+    check("and it's still a real value from this category's own list, not invented",
+          got in frame_spec.values, True)
+
+
 def test_a_misfiled_slipper_is_named_in_the_report():
     """The routing now handles these, but the Master File row is still
     self-contradictory and the fix belongs there. Named so nobody has to

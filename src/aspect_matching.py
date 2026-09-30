@@ -430,6 +430,39 @@ def _size_format_variants(raw: str) -> list[str]:
     return variants
 
 
+def _redundant_slash_half(raw: str, valid_values: list[str]) -> str | None:
+    """Some brands print one size twice on the same label, joined by a
+    slash: a letter plus a continental number denoting the exact same size
+    (a Prada "S/36", "M/38" — UK S is EU 36, UK M is EU 38, the standard
+    offset), or a letter plus a foreign synonym for it (a Missoni Home
+    "XS/TP" — TP is French "Tres Petit", the same XS). 30.09.26,
+    QTN02-002-163 and QTN02-002-166 ("S/36", "M/38") and QTN02-001-335 /
+    QTN02-001-913 ("XS/TP") all failed this way in one batch.
+
+    This is NOT the genuine two-size range eBay itself publishes as a
+    slash pair (S/M, M/L, L/XL — see SIZE_ALIASES's slash-preserving key
+    and _size_alias_key's docstring) and it must never be confused with
+    one: guessing a single size out of a real range is exactly the thing
+    this codebase refuses to do everywhere else sizing is resolved.
+
+    So this only fires when the LEFT half is already, by itself, one of
+    eBay's real values for this category (nothing is invented) AND the
+    RIGHT half is NOT itself one of eBay's real size values too (if it
+    were, "X/Y" could genuinely be a range from X to Y, and picking X
+    would be exactly that guess)."""
+    if "/" not in raw:
+        return None
+    left, right = (p.strip() for p in raw.split("/", 1))
+    if not left or not right:
+        return None
+    left_match = next((v for v in valid_values if v.lower() == left.lower()), None)
+    if not left_match:
+        return None
+    if any(v.lower() == right.lower() for v in valid_values):
+        return None
+    return left_match
+
+
 def match_size(raw: str | None, valid_values: list[str] | None) -> str | None:
     if not raw or not valid_values:
         return None
@@ -443,7 +476,7 @@ def match_size(raw: str | None, valid_values: list[str] | None) -> str | None:
         matched = fuzzy_match(variant, valid_values, cutoff=0.85)
         if matched:
             return matched
-    return None
+    return _redundant_slash_half(raw, valid_values)
 
 
 # Footwear EU -> UK conversion. The Measurements file's raw shoe "Size" is
@@ -1456,6 +1489,14 @@ _TYPE_TITLE_PATTERNS: list[tuple[str, list[str]]] = [
     ("Button-Up", [r"\bshirt\b"]),
     ("Tank", [r"\btank\b", r"\bcami\b", r"\bvest\b", r"\bbustier\b",
               r"\bcorset(?:ed)?\b", r"\bstrapless\b", r"\bhalter\b"]),
+    # Nightwear (63855). 24.09.26: QTN02-002-072, a Missoni Home bathrobe.
+    # Its own SubCat2 is "Bedding and Bathroom" — our internal homeware
+    # label, the same one fix39 taught category_mapping to see past for the
+    # category itself — so it fuzzy-matches nothing in Nightwear's Type
+    # list and left C:Type empty on a Required field. "\brobe\b" alone
+    # would not catch "bathrobe" (no word boundary before "robe" inside
+    # it), so that and "dressing gown" are listed explicitly.
+    ("Robe", [r"\bbathrobe\b", r"\bdressing\s?gown\b", r"\brobe\b"]),
     # Jumpsuits & Playsuits (3009). One garment, whatever it's called.
     ("One-Piece", [r"\bjumpsuit\b", r"\bplaysuit\b", r"\bcatsuit\b",
                    r"\bbodysuit\b", r"\bunitard\b", r"\bleotard\b",
