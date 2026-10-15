@@ -1980,7 +1980,7 @@ def test_a_row_ebay_would_refuse_never_reaches_the_upload_file():
     try:
         with tempfile.TemporaryDirectory() as d:
             out = pathlib.Path(d) / "Upload.csv"
-            results, considered, uncovered, unmatched, failed, held = pipeline.run(
+            results, considered, uncovered, unmatched, failed, held, linnworks_notes = pipeline.run(
                 master_path="unused", measurements_path="unused",
                 template_path=[str(templates_dir / "menswear_shoes.json")],
                 output_path=out, cache_dir=d, force_regenerate=True,
@@ -2015,6 +2015,119 @@ def test_a_row_ebay_would_refuse_never_reaches_the_upload_file():
             report = out.with_name(out.stem + "_checks.txt").read_text()
             check("the report names it in the counts", "1 held back" in report, True)
             check("and lists the SKU", "BAD-001" in report, True)
+    finally:
+        (ai_client.call_structured, data_loader.load_products,
+         brand_blurb.build_blurbs) = originals
+
+
+def test_linnworks_condition_notes_written_only_for_live_rows_with_a_note():
+    """15.10.26. Sammy: "build Condition Description as a separate item
+    specific... so we can pull this into Linnworks and onto Shopify." The
+    Material backfill test (14.09.26) already found Linnworks doesn't read
+    eBay item specifics back out of a listing, so the fix that actually
+    reaches Linnworks is a file of its own — see
+    build.write_linnworks_condition_notes.
+
+    Three SKUs, three different outcomes a real batch produces:
+    - GOOD-001: preloved (condition 3000), has a note — goes in.
+    - NEW-001: brand new (condition 1000) — build_row leaves
+      ConditionDescription blank for this condition on purpose (eBay warns
+      21919111 otherwise, see PREAMATO_UPLOAD_ERRORS.md), so this SKU must
+      not appear in the Linnworks file at all, not even with a blank note.
+    - BAD-001: held back (no photos) — never reaches the upload file, so
+      it must never reach the Linnworks file either. A SKU only goes to
+      Linnworks once it's actually going live on eBay."""
+    import csv as _csv
+    import tempfile
+    from src import ai_client, brand_blurb, data_loader, pipeline
+
+    templates_dir = pathlib.Path(__file__).resolve().parent.parent / "data" / "templates"
+    if not (templates_dir / "menswear_shoes.json").exists():
+        print("  (skipped: data/templates not present in this checkout)")
+        return
+
+    def make(sku, images):
+        return Product(
+            sku=sku,
+            master={"Brand": "ROA", "Gender": "MEN", "Colour": "Brown",
+                    "Category": "Footwear", "SubCat2": "Boots", "Rounded RRP": 395,
+                    "Country of Origin": "ITA", "Clean Title Description": "ROA HIKING BOOT"},
+            measurements={"Size": "EU 45", "Description": "Good condition.",
+                          "Images 2D link": images},
+        )
+
+    good = make("GOOD-001", "http://a|http://b|http://c")
+    new = make("NEW-001", "http://a|http://b|http://c")
+    bad = make("BAD-001", "")  # no photos: held back, never reaches either file
+
+    def fake_ai(system, user, tool_name, input_schema, **kwargs):
+        if tool_name == "pick_category":
+            return {"category_id": "11498", "reasoning": "stub"}
+        props = input_schema["properties"]["item_specifics"]["properties"]
+        required = set(input_schema["properties"]["item_specifics"].get("required", []))
+        specifics = {}
+        for name, spec in props.items():
+            if name not in required:
+                continue
+            if spec.get("type") == "array":
+                specifics[name] = spec["items"]["enum"][:1]
+            elif "enum" in spec:
+                specifics[name] = spec["enum"][0]
+            else:
+                specifics[name] = "Leather"
+        condition_id = 1000 if "SKU: NEW-001" in user else 3000
+        return {
+            "title": "ROA Hiking Boots Brown Suede EU 45 RRP 395",
+            "condition_id": condition_id,
+            "condition_description": "Good condition, light preloved wear." if condition_id != 1000 else "",
+            "material_summary": "Suede",
+            "item_specifics": specifics,
+        }
+
+    originals = (ai_client.call_structured, data_loader.load_products, brand_blurb.build_blurbs)
+    ai_client.call_structured = fake_ai
+    data_loader.load_products = lambda *a, **k: ([good, new, bad], [])
+    brand_blurb.build_blurbs = lambda brands, cache_dir: {
+        brand_blurb.blurb_key(*(b if isinstance(b, tuple) else (b,))): ""
+        for b in brands}
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            out = pathlib.Path(d) / "Upload.csv"
+            results, considered, uncovered, unmatched, failed, held, linnworks_notes = pipeline.run(
+                master_path="unused", measurements_path="unused",
+                template_path=[str(templates_dir / "menswear_shoes.json")],
+                output_path=out, cache_dir=d, force_regenerate=True,
+            )
+
+            check("only the live SKU with a note counts", len(linnworks_notes), 1)
+            check("the file exists", Path(linnworks_notes.path).exists(), True)
+
+            lines = Path(linnworks_notes.path).read_text(encoding="utf-8-sig").splitlines()
+            notes_rows = list(_csv.DictReader(lines))
+            check("header matches the Linnworks Extended Properties shape",
+                  notes_rows and set(notes_rows[0]) == {"SKU", "Property Name", "Property Value", "Property Type"},
+                  True)
+            skus_in_file = [r["SKU"] for r in notes_rows]
+            check("the preloved SKU with a note is in it", skus_in_file, ["GOOD-001"])
+            check("the new (condition 1000) SKU is NOT in it, blank note or not",
+                  "NEW-001" in skus_in_file, False)
+            check("the held-back SKU is NOT in it either",
+                  "BAD-001" in skus_in_file, False)
+            check("Property Name is the one Linnworks is configured to read",
+                  notes_rows[0]["Property Name"], "ConditionNotes")
+            check("Property Type is Attribute",
+                  notes_rows[0]["Property Type"], "Attribute")
+
+            # Both live SKUs made the upload file — this isn't re-testing the
+            # held-back mechanism, just confirming NEW-001 wasn't collaterally
+            # dropped by this change, only its note was.
+            uploaded_skus = sorted(r["Custom label (SKU)"] for tr in results for r in tr.rows)
+            check("both live products are still in the upload file",
+                  uploaded_skus, ["GOOD-001", "NEW-001"])
+
+            report = out.with_name(out.stem + "_checks.txt").read_text()
+            check("the report counts the Linnworks notes too",
+                  "1 condition note(s) written for the Linnworks import" in report, True)
     finally:
         (ai_client.call_structured, data_loader.load_products,
          brand_blurb.build_blurbs) = originals
@@ -2081,7 +2194,7 @@ def test_a_missing_stock_file_is_never_silently_dropped():
     try:
         with tempfile.TemporaryDirectory() as d:
             out = pathlib.Path(d) / "Upload.csv"
-            results, considered, uncovered, unmatched, failed, held = pipeline.run(
+            results, considered, uncovered, unmatched, failed, held, linnworks_notes = pipeline.run(
                 master_path="unused", measurements_path="unused",
                 template_path=[str(templates_dir / "menswear_shoes.json")],
                 output_path=out, cache_dir=d, force_regenerate=True,

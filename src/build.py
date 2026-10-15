@@ -40,6 +40,15 @@ EXTRA_COLUMNS = ["OriginalRetailPrice", "ConditionDescription", "C:Country of Or
 # so this is deliberately a single value rather than "anything new".
 CONDITION_NO_DESCRIPTION = 1000
 
+# Linnworks doesn't read eBay item specifics back out of a listing — it
+# only knows what's in its own import file for a SKU (see the Material
+# backfill test, 14.09.26: Material was live on an eBay listing Linnworks
+# had never heard of). So getting the condition note to Linnworks, and from
+# there to Shopify, means handing Linnworks its own file, not adding
+# another eBay column. This is the property name Sammy's eBay configurator
+# in Linnworks is set up to read. Sammy, 15.10.26.
+LINNWORKS_CONDITION_PROPERTY_NAME = "ConditionNotes"
+
 from . import aspect_matching, brand_blurb, config, ebay_template
 from .data_loader import Product, split_image_urls
 
@@ -378,3 +387,40 @@ def write_csv(rows: list[dict], template: ebay_template.EbayTemplate, output_pat
         writer.writerow(headers)
         for row in rows:
             writer.writerow([_csv_cell(row.get(h)) for h in headers])
+
+
+def write_linnworks_condition_notes(rows: list[dict], output_path: str | Path) -> int:
+    """Writes a Linnworks "Extended Properties" import: SKU, Property Name,
+    Property Value, Property Type, one row per listing that actually has a
+    condition note.
+
+    `rows` is expected to already be filtered to only the listings that
+    were written to the upload file (never a held-back row — those aren't
+    going live, so their SKU shouldn't reach Linnworks yet) and to only
+    those carrying a non-empty ConditionDescription — build_row already
+    leaves that blank on condition 1000 ("New with box"), which is exactly
+    the set of listings a condition note would never apply to, so no
+    separate skip logic is needed here.
+
+    Property Type "Attribute" and the exact header row match what Sammy's
+    own manual version of this (the "Condition Notes to Linnworks" page)
+    already produces, so either one maps onto the same Linnworks import
+    definition. Returns the number of rows written, so the caller can skip
+    writing a file at all when there's nothing to put in it.
+
+    utf-8-sig for the same reason as write_csv: Excel auto-detects UTF-8
+    and renders a £ sign in a note correctly rather than mangling it."""
+    with open(output_path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f)
+        writer.writerow(["SKU", "Property Name", "Property Value", "Property Type"])
+        for row in rows:
+            note = row.get("ConditionDescription")
+            if not note:
+                continue
+            writer.writerow([
+                row.get("Custom label (SKU)"),
+                LINNWORKS_CONDITION_PROPERTY_NAME,
+                note,
+                "Attribute",
+            ])
+    return sum(1 for row in rows if row.get("ConditionDescription"))

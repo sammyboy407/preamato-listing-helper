@@ -93,7 +93,7 @@ def main() -> None:
 
     output_path = args.output or str(DEFAULT_OUTPUT_DIR / pipeline.default_output_filename())
 
-    results, considered, uncovered, unmatched, failed, held_back = pipeline.run(
+    results, considered, uncovered, unmatched, failed, held_back, linnworks_notes = pipeline.run(
         master_path=args.master,
         measurements_path=args.measurements,
         template_path=args.template,
@@ -118,6 +118,9 @@ def main() -> None:
               f"the upload file. They are in {held_back.path}:")
         for sku, reasons in held_back.reasons:
             print(f"  {sku}: {'; '.join(reasons)}")
+    if linnworks_notes:
+        print(f"\n{len(linnworks_notes)} condition note(s) written to {linnworks_notes.path} "
+              f"for the Linnworks Extended Properties import.")
     if failed:
         print(f"\n{len(failed)} product(s) failed and are NOT in the file:")
         for f in failed:

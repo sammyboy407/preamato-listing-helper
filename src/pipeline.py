@@ -210,6 +210,23 @@ class TemplateResult:
     rows: list[dict] = field(default_factory=list)
 
 
+@dataclass
+class LinnworksNotes:
+    """The Extended Properties import built for Linnworks — see
+    build.write_linnworks_condition_notes. `count` is 0 and `path` is None
+    when nothing in the batch carried a condition note (e.g. an all-new,
+    condition-1000 batch), in which case no file is written at all rather
+    than an empty one."""
+    count: int = 0
+    path: str | None = None
+
+    def __bool__(self) -> bool:
+        return self.count > 0
+
+    def __len__(self) -> int:
+        return self.count
+
+
 def run(
     master_path: str | Path | list,
     measurements_path: str | Path | list,
@@ -620,6 +637,23 @@ def run(
             on_progress(f"Wrote {len(tr.rows)} rows to {tr.output_path}", None)
             template_results.append(tr)
 
+    # A Linnworks Extended Properties import, SKU plus the same condition
+    # note that's on the eBay listing — see build.write_linnworks_condition_notes
+    # for why this goes to Linnworks as its own file rather than riding
+    # along as an eBay item specific. Built only from rows that actually
+    # made the upload file (never a held-back one), so a SKU only reaches
+    # Linnworks once it's actually going live.
+    linnworks_notes_path = None
+    uploaded_rows = [row for tr in template_results for row in tr.rows]
+    linnworks_count = sum(1 for row in uploaded_rows if row.get("ConditionDescription"))
+    if linnworks_count:
+        base = Path(output_path)
+        linnworks_notes_path = base.with_name(f"{base.stem} LINNWORKS CONDITION NOTES{base.suffix}")
+        build.write_linnworks_condition_notes(uploaded_rows, linnworks_notes_path)
+        on_progress(
+            f"{linnworks_count} condition note(s) written to {linnworks_notes_path.name} "
+            f"for the Linnworks Extended Properties import.", None)
+
     # The rows eBay would refuse, in their own file, with the reason in a
     # column of its own. Same shape as the upload file — the #INFO preamble,
     # the same headers — so once the underlying data is fixed it can be
@@ -669,6 +703,9 @@ def run(
         header.append(f"  {len(errors)} skipped: failed during generation (listed below)")
     if held:
         header.append(f"  {len(held)} held back: eBay would refuse them (listed below)")
+    if linnworks_count:
+        header.append(f"  {linnworks_count} condition note(s) written for the Linnworks import "
+                       f"({Path(linnworks_notes_path).name})")
     if not unmatched_skus and not uncovered_skus and not errors and not held and rows_out == len(products):
         header.append("  Nothing was dropped.")
     header.append("")
@@ -728,4 +765,7 @@ def run(
         skus=held_skus,
         reasons=[(str(row.get("Custom label (SKU)")), rs) for _idx, row, rs in held],
         path=str(held_path) if held_path else None,
+    ), LinnworksNotes(
+        count=linnworks_count,
+        path=str(linnworks_notes_path) if linnworks_notes_path else None,
     )

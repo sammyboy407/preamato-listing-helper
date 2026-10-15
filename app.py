@@ -236,6 +236,9 @@ def _report_text(rep: dict) -> str:
         out += ["", f"KEPT OUT of the upload file — eBay would refuse these "
                     f"({len(rep['held_back'])}). The upload file itself is safe as it is:"]
         out += [f"  - {sku}: {'; '.join(reasons)}" for sku, reasons in rep["held_back"]]
+    if rep.get("linnworks_notes_path"):
+        out += ["", f"{rep['linnworks_notes_count']} condition note(s) written for Linnworks: "
+                    f"{Path(rep['linnworks_notes_path']).name}"]
     if rep["failed"]:
         out += ["", f"FAILED, not in the file ({len(rep['failed'])}). "
                     f"Fix at source and re-run:"]
@@ -281,6 +284,21 @@ def _render_report(rep: dict) -> None:
                     use_container_width=True,
                     key="held_back_download",
                 )
+    if rep.get("linnworks_notes_path") and Path(rep["linnworks_notes_path"]).exists():
+        st.success(
+            f"{rep['linnworks_notes_count']} condition note(s) ready for Linnworks — "
+            f"import this as an Extended Properties file (SKU, Property Name "
+            f"\"ConditionNotes\", Property Value, Property Type)."
+        )
+        with open(rep["linnworks_notes_path"], "rb") as fh:
+            st.download_button(
+                f"Download {Path(rep['linnworks_notes_path']).name}",
+                fh,
+                file_name=Path(rep["linnworks_notes_path"]).name,
+                mime="text/csv",
+                use_container_width=True,
+                key="linnworks_notes_download",
+            )
     if rep["failed"]:
         st.error(
             f"{len(rep['failed'])} product(s) failed and are NOT in the file. "
@@ -481,7 +499,7 @@ if run_clicked:
                 progress_bar.progress(min(max(frac, 0.0), 1.0))
 
         try:
-            results, considered, uncovered, unmatched, failed, held_back = pipeline.run(
+            results, considered, uncovered, unmatched, failed, held_back, linnworks_notes = pipeline.run(
                 master_path=master_paths,
                 measurements_path=measurements_paths,
                 template_path=template_paths,
@@ -518,6 +536,8 @@ if run_clicked:
                 "not_listed": len(failed) + len(uncovered) + len(unmatched) + len(held_back),
                 "held_back": list(held_back.reasons),
                 "held_back_path": held_back.path,
+                "linnworks_notes_count": len(linnworks_notes),
+                "linnworks_notes_path": linnworks_notes.path,
                 "failed": list(failed),
                 "uncovered": list(uncovered),
                 "unmatched": list(unmatched),
