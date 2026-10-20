@@ -58,10 +58,15 @@ def make_template(aspects=None):
 
 
 def make_product(measurements=None, brand="SIMONE ROCHA"):
+    # A real row always has condition notes; one without them is its own
+    # REVIEW (_check_missing_condition_notes), so a test that wants that
+    # case passes "Description": "" explicitly.
+    measurements = dict(measurements or {})
+    measurements.setdefault("Description", "Good condition.")
     return Product(
         sku="TEST-001",
         master={"Brand": brand, "Gender": "WOMEN", "Colour": "White"},
-        measurements=measurements or {},
+        measurements=measurements,
     )
 
 
@@ -1320,6 +1325,26 @@ def test_the_condition_note_leads_the_description_and_fills_condition_notes():
     check("new item: no C:Condition Notes value", row.get(build.CONDITION_NOTES_ASPECT), None)
 
 
+def test_missing_condition_notes_are_flagged_in_the_report():
+    """20.10.26. The description used to carry a placeholder when the
+    Pictures & Measurements file had no condition notes for a SKU. The
+    "Condition:" line it lived on is gone, so the gap is a REVIEW in the
+    checks report instead — never blocking, never in the description."""
+    gap = "no condition/defect notes"
+
+    found = run(good_row(), product=make_product({"Description": ""}), size="8")
+    flagged = [i for i in found if gap in i.message]
+    check("no notes: flagged once", len(flagged), 1)
+    check("no notes: as a REVIEW", [i.kind for i in flagged], ["REVIEW"])
+    check("no notes: never blocks the row", [i.blocking for i in flagged], [False])
+
+    check("whitespace-only notes count as none",
+          any(gap in m for m in messages(run(good_row(), product=make_product({"Description": "  "}),
+                                             size="8"))), True)
+    check("notes present: silent",
+          any(gap in m for m in messages(run(good_row(), size="8"))), False)
+
+
 def test_a_new_listing_that_calls_itself_preloved_is_caught():
     """17.09.26. 18 rows of one batch of 75 went live at ConditionID 1000
     (New with tags) reading "This item is new and unused, but our inspection
@@ -1948,7 +1973,7 @@ def test_a_mens_item_in_a_womens_category_is_reported():
     decides, because this account's templates force some crossings and a
     silent drop would be worse than a listing in the wrong aisle."""
     mens = Product(sku="TEST-001", master={"Brand": "SIMONE ROCHA", "Gender": "MEN"},
-                   measurements={})
+                   measurements={"Description": "Good condition."})
     issues = run(good_row(**{"Category name": "Women's Shoes > Trainers"}), product=mens, size="8")
     check("the crossing is reported",
           any("listed in" in m for m in messages(issues, "REVIEW")), True)

@@ -129,6 +129,7 @@ def check_row(
     _check_length_contradictions(sku, row, issues)
     _check_condition_contradictions(sku, row, issues)
     _check_description_gaps(sku, row, issues)
+    _check_missing_condition_notes(sku, product, issues)
 
     return issues
 
@@ -578,6 +579,25 @@ def _check_description_gaps(sku, row, issues):
     blank_labels = re.findall(r"(?:^|<br>|\n)\s*([A-Z][A-Za-z /()]{2,30}):\s*(?=<br>|\n|$)", description)
     for label in sorted(set(blank_labels)):
         issues.append(Issue(sku, "REVIEW", f"the description's {label!r} line is empty"))
+
+
+def _check_missing_condition_notes(sku, product, issues):
+    """No condition/defect notes in the Pictures & Measurements file for
+    this SKU, so the condition the listing states is the AI's own wording,
+    not something anyone recorded from the physical item.
+
+    This used to be a placeholder written into the description itself
+    ("[add from scan sheet defect column...]"), on the old "Condition:"
+    line. That line went 20.10.26 when the bold condition note at the top
+    replaced it, so the gap is named here instead, where it can't reach a
+    buyer. Reported, never blocked."""
+    if _text(product.measurements.get("Description")):
+        return
+    issues.append(Issue(
+        sku, "REVIEW",
+        "no condition/defect notes in the Pictures & Measurements file — the listing's "
+        "condition text is the AI's own wording. Check the item and add its notes "
+        "before this goes live"))
 
 
 def summarise(issues: list[Issue]) -> str:
