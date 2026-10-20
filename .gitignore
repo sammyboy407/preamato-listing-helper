@@ -8,3 +8,4 @@ output/
 .streamlit/secrets.toml
 
 .env
+Claude outputs/
