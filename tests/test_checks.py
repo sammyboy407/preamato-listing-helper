@@ -1272,11 +1272,14 @@ def test_condition_description_is_dropped_for_new_with_box():
               sent_for(condition_id), "Comes without its box.")
 
 
-def test_the_condition_note_leads_the_description_and_fills_condition_notes():
-    """20.10.26. The condition note opens the description in bold, and goes
-    on the listing as C:Condition Notes, cut to eBay's 65-character limit
-    on a custom item specific at a word boundary. A condition 1000 item has
-    no note, so it gets neither."""
+def test_the_condition_note_leads_the_description():
+    """20.10.26. The condition note opens the description in bold. A
+    condition 1000 item has no note, so it gets no bold line.
+
+    It also went on the listing as a C:Condition Notes item specific for a
+    while, but eBay's 65-character limit on custom item specifics cut the
+    useful part of the note off, so that column was removed. Nothing may
+    write it back."""
     from src import build
 
     def row_for(condition_id, note):
@@ -1298,31 +1301,22 @@ def test_the_condition_note_leads_the_description_and_fills_condition_notes():
     check("short note: no second Condition: line further down",
           "Condition: " in row["Description"], False)
     check("short note: the note appears once", row["Description"].count(short), 1)
-    check("short note: C:Condition Notes is the whole note",
-          row[build.CONDITION_NOTES_ASPECT], short)
+    check("short note: no C:Condition Notes column", "C:Condition Notes" in row, False)
 
-    # Long: cut at the last whole word inside 65 characters.
+    # Long: the bold line carries the whole note, never cut.
     long_note = ("Very good pre-owned condition with light wear to the hem and a "
                  "faint mark on the inside of the waistband")
     row = row_for(3000, long_note)
-    capped = row[build.CONDITION_NOTES_ASPECT]
     check("long note: bold line carries the full note",
           row["Description"].startswith(f"<b>{long_note}</b><br>\n"), True)
-    check("long note: capped value",
-          capped, "Very good pre-owned condition with light wear to the hem and a")
-    check("long note: within 65 characters", len(capped) <= 65, True)
-    check("long note: ends on a whole word of the original",
-          long_note.startswith(capped) and long_note[len(capped)] == " ", True)
-    check("long note: no ellipsis", capped.endswith(("...", "…")), False)
-    # A cut that lands just after a comma doesn't leave the comma hanging.
-    check("long note: dangling comma dropped",
-          build.condition_notes_aspect("Good condition overall, " + "x" * 50 + " more"),
-          "Good condition overall")
+    check("long note: no C:Condition Notes column", "C:Condition Notes" in row, False)
+    check("long note: no C:Condition Notes in the upload headers",
+          "C:Condition Notes" in build.output_headers(make_template(), [row]), False)
 
-    # New (condition 1000): no note, so neither change applies.
+    # New (condition 1000): no note, so no bold line.
     row = row_for(1000, "Brand new with tags.")
     check("new item: no bold line", "<b>" in row["Description"], False)
-    check("new item: no C:Condition Notes value", row.get(build.CONDITION_NOTES_ASPECT), None)
+    check("new item: no C:Condition Notes column", "C:Condition Notes" in row, False)
 
 
 def test_missing_condition_notes_are_flagged_in_the_report():
