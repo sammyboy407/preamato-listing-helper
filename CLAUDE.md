@@ -1,77 +1,81 @@
 # Preamato Listing Helper
 
-Read this before making changes — it's the fast path to full context instead of re-deriving it from the code.
+A Streamlit app + CLI that turns a Master File (.xlsx) + Pictures & Measurements file (+ optional eBay bulk template) into a ready-to-upload eBay bulk CSV, using the Anthropic API to write per-product titles, descriptions, and item specifics. Deployed on Streamlit Community Cloud, redeploying automatically from `main`.
 
-## What this is
+Owner: Sammy. This file is read automatically by Claude Code at the start of every session in this repo, so keep it accurate and keep it short — it's the one piece of project memory that travels with the code itself.
 
-A Streamlit app + CLI (`app.py` / `src/main.py`) that replaces manual eBay bulk-upload work for
-Sammy's preloved-luxury eBay store. It takes a Master File (product data), a Pictures &
-Measurements file, and optionally a real eBay bulk-listing template, and produces a ready-to-upload
-eBay file — AI-written SEO titles/descriptions (via the Anthropic API), mapped categories, and
-fixed business constants (VAT%, shipping/return/payment profiles, etc.) filled in. Goal: replace
-Optiseller (~£3k/month) and cut listing turnaround from ~2 weeks to same-day.
+## Before you touch anything: run the tests
 
-This is a real, currently-used production tool for a real business — not a demo. Get changes
-right; a wrong category mapping or a missing required field can suppress or break a live listing.
+```
+python3 tests/run_all.py
+```
 
-## Architecture
+This imports every module under `src/` before running anything (catches Python-version import errors immediately, see below), then runs the sizing checks and the listing checks. Everything must pass before a commit. A red run is safe and leaves nothing committed — just fix it and rerun.
 
-- `app.py` — Streamlit UI.
-- `src/main.py` — CLI entry point (same pipeline as the UI).
-- `src/pipeline.py` — orchestration: loads sources, maps categories, generates AI content, writes
-  output. Read this first to understand the overall flow.
-- `src/data_loader.py` — reads/merges Master File(s) + Measurements file(s), matches products
-  (measurements file's `Name` column against master file's `SKU`; the measurements file's own
-  `SKU` column is actually the barcode, not used for matching).
-- `src/ebay_template.py` — parses a real uploaded eBay "Create listings in bulk" template. Uses
-  `python_calamine`, not `openpyxl` — real eBay template exports are malformed for openpyxl.
-- `src/builtin_catalog.py` — fallback used when no template is uploaded: builds a synthetic
-  template from `data/account_listings_export.csv` (a "Download All Listings" export of this
-  account's own historical listings). **That CSV is currently missing from the repo** — it existed
-  only on Felix's machine and was never committed. Until Sammy re-exports and adds it, the
-  no-template fallback path won't work; uploading a real template each run does work.
-- `src/category_mapping.py` — maps each product to a category actually present in the given
-  template (AI-assisted, cached). Deliberately scoped to only the template's own categories, not
-  eBay's full tree — see `src/category_codes.py` below for why.
-- `src/category_codes.py` — loader/keyword-search over eBay's full category tree
-  (`data/Ebay Category Codes.csv`, also not yet generated — see below). Currently a **standalone
-  reference/lookup tool only** (`python3 -m src.category_codes "query"`), intentionally NOT wired
-  into the live pipeline: the full tree carries no Required/Preferred/Optional aspect data, so
-  auto-picking from it could produce listings missing required item specifics. Get sign-off from
-  Sammy before changing that.
-- `src/content_generator.py` / `src/ai_client.py` / `src/brand_blurb.py` — AI title/description
-  generation, cached per SKU.
-- `src/config.py` — real business constants (VAT%, location, shipping/return/payment profile
-  names, price ratio, etc.). These are Sammy's actual account settings, not placeholders.
-- `src/aspect_matching.py`, `src/schema.py`, `src/build.py` — item-specific field matching and
-  final row assembly.
-- `ASSUMPTIONS.md` — detailed, per-category notes on what's tested vs. untested, and every
-  judgment call baked into the pipeline (pricing ratio, condition grading defaults, category
-  terminology bridging, etc.). Read before touching category-mapping or content-generation logic.
-- `README.md` — setup and usage instructions.
+## The Python version trap
 
-## Known gaps / open items (as of 03.09.26)
+The Mac's `python3` (the one that runs the tests and that `deploy.sh` used to use) is **3.9**. Streamlit Cloud runs something newer. A fix can be correct on a newer Python and still fail here. Concretely:
 
-1. `data/account_listings_export.csv` (built-in catalog source) — missing, needs Sammy to
-   re-export "Download All Listings" from Seller Hub.
-2. `data/Ebay Category Codes.csv` (full category reference) — not yet generated. Run
-   `scripts/fetch_ebay_category_tree.py` once Sammy has free `developer.ebay.com` API keys
-   (App ID / Cert ID) — see that script's docstring for the exact steps.
-3. Not yet tested end-to-end with real Master File + Measurements file + a live Anthropic API key
-   — only static analysis (`py_compile`, `pyflakes`) and manual review so far.
-4. Jewellery and Lifestyle (homeware) categories are completely untested — see ASSUMPTIONS.md.
-   Treat AI output for those categories with real skepticism until validated.
-5. `STORE_CATEGORY_MAP` in `src/config.py` is empty — no source data gives Sammy's private eBay
-   Store category IDs yet.
+- Never write a bare `str | None` / `list[dict]` style union as a runtime expression (e.g. in a `Callable[[...], ...]` alias) — Python 3.9 can't evaluate it even with `from __future__ import annotations`, since `from __future__ import annotations` only defers *annotations*, not expressions. Use `Optional[str]` / `typing.List[dict]` for anything that gets evaluated at runtime, or keep `str | None` only inside actual type-hint positions (those are fine, since they're deferred).
+- `tests/run_all.py` prints the Python version it ran under and will say exactly which file failed to import if this happens — read that message, don't guess.
 
-## Working conventions
+## Git commit messages: a real macOS bash bug
 
-- Run `python3 -m py_compile <changed files>` and `python3 -m pyflakes <changed files>` before
-  calling a change done — this codebase has caught real bugs this way before (missing imports,
-  missing dependencies).
-- `requirements.txt` must list every third-party import actually used — check
-  `python-calamine`/`openpyxl`/`anthropic`/`streamlit` stay in sync with what's imported.
-- Cache files (`cache/category_mapping*.json`, `cache/content_cache.json`) are gitignored and
-  per-environment — don't try to commit or "fix" them.
-- The full project history and business context lives in Sammy's Claude Project ("ebay listing
-  creation") — worth checking there for anything this file doesn't cover.
+macOS ships bash 3.2.6 (frozen, will never update). The pattern
+
+```bash
+git commit -m "$(cat <<'EOF'
+...multi-line message with apostrophes...
+EOF
+)"
+```
+
+breaks on this shell with `unexpected EOF while looking for matching ')'` when the message body has more than a couple of embedded apostrophes. It's a real parser bug in bash 3.2, not a typo.
+
+**Always commit like this instead:**
+
+```bash
+cat > /tmp/commit_msg.txt <<'MSGEOF'
+Your commit message here.
+Can have multiple lines and apostrophes fine.
+MSGEOF
+git commit -F /tmp/commit_msg.txt
+```
+
+Keep commit messages **ASCII only** — curly quotes and the £ sign have come out mangled in this shell's locale before. Write "GBP" or "pound" instead of £, and straight quotes only.
+
+## Deploying
+
+```
+git add -A
+git commit -F /tmp/commit_msg.txt   # see above, never -m with a heredoc
+git push
+```
+
+Streamlit redeploys from `main` automatically, about two minutes. **Reboot the app from Manage app before the next run** — it can otherwise keep serving the old build.
+
+After every reboot, two settings reset and need rechecking in the app itself:
+- **Test run only** goes back to on, limited to 5 products
+- **Price slider** goes back to 50% of RRP
+
+## eBay business policies
+
+Shipping/return/payment profile names in `src/config.py` (`SHIPPING_PROFILE` etc.) must match **exactly** what's live in eBay Seller Hub. If a policy gets renamed on eBay's side (it has happened before), every row using the old name fails upload with "invalid postage policy" (or the return/payment equivalent) — this is an eBay-side rename, not a data bug, and the fix is just updating the constant to match the new name exactly.
+
+## QC / held-back rows
+
+Rows eBay would refuse (missing photos, contradictory data, etc.) are never written into the main upload CSV. They go to a sibling `... NEEDS ATTENTION.csv` file instead, with a `WHY THIS ROW IS HELD BACK` column naming the reason. That column must be dropped before a fixed row is re-uploaded.
+
+## Linnworks condition notes
+
+Every run also writes `... LINNWORKS CONDITION NOTES.csv` alongside the main upload: a Linnworks Extended Properties import (`SKU, Property Name, Property Value, Property Type`, Property Name always `ConditionNotes`, Property Type always `Attribute`). Only rows that are both (a) in the live upload file (not held back) and (b) have a non-empty `ConditionDescription` (new/condition-1000 items never get one) are included. Built in `src/build.py` (`write_linnworks_condition_notes`), wired through `src/pipeline.py` (`LinnworksNotes` dataclass, 7th element of `pipeline.run()`'s return tuple) and surfaced in both `app.py` and `src/main.py`.
+
+## Credentials
+
+GitHub auth lives in the macOS keychain (`credential.helper osxkeychain`) — `git push` should never prompt. If it does, see the GitHub PAT settings: Repository access must be scoped to `Only select repositories → preamato-listing-helper` *before* the Contents permission section even appears (easy to miss — this cost an hour once). Set Contents to Read and write.
+
+**Never paste a token, password, or API key into a Claude chat, local or cloud.** If one ever gets pasted anywhere outside the keychain store command, treat it as compromised and regenerate it immediately, it doesn't matter whether it was "only used once."
+
+## Deeper history
+
+Business-side knowledge (eBay title/sizing/colour/category rules, batch review notes, past incidents) lives in the "ebay listing creation" Claude Project on claude.ai, not in this repo. That's reference material for *listing content* decisions; this file is for *this codebase's* mechanics. Pull a specific doc over into a conversation with Claude Code if a task needs it — there's no automatic link between the two.
