@@ -9,3 +9,6 @@ output/
 
 .env
 Claude outputs/
+
+data/last_batch_report.json
+data/last_batch_report.json.tmp

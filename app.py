@@ -17,7 +17,7 @@ import openpyxl
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from src import branding, config, ebay_template, pipeline  # noqa: E402
+from src import branding, config, ebay_template, last_batch, pipeline  # noqa: E402
 
 APP_DIR = Path(__file__).resolve().parent
 CACHE_DIR = APP_DIR / "cache"
@@ -335,256 +335,322 @@ def _render_report(rep: dict) -> None:
             key="run_report_download",
         )
 
-st.subheader("1. Your Anthropic API key")
-api_key = st.text_input(
-    "API key",
-    type="password",
-    value=os.environ.get("ANTHROPIC_API_KEY", ""),
-    help="Get one at console.anthropic.com. Used only for this session — never saved to disk.",
-    label_visibility="collapsed",
-)
-with st.expander("Workspace ID (only needed for some keys)"):
-    st.caption(
-        "Most keys don't need this — leave it blank. It's only required if your API key is "
-        "\"identity-linked\" (a Personal or Service Account key) AND set to work across "
-        "multiple workspaces rather than restricted to just one. If you see an error mentioning "
-        "\"anthropic-workspace-id is required\", either paste that workspace's ID here (from "
-        "console.anthropic.com > Settings > Workspaces), or simpler: go create a new key there "
-        "restricted to a single workspace instead, which needs no ID at all."
-    )
-    workspace_id = st.text_input(
-        "Workspace ID",
-        value=os.environ.get("ANTHROPIC_WORKSPACE_ID", ""),
-        placeholder="wrkspc_...",
+_STATUS_LABELS = {
+    last_batch.FAILED: ("❌", "FAILED"),
+    last_batch.HELD_BACK: ("⛔", "HELD BACK"),
+    last_batch.UNCOVERED: ("⚠️", "NOT COVERED"),
+    last_batch.UNMATCHED: ("⚠️", "NO STOCK DATA ROW"),
+}
+
+
+def _render_last_batch() -> None:
+    """The Last Batch tab: the saved report, or this session's if newer.
+    Anything that didn't reach a clean listing comes first, each SKU in its
+    own red box rather than a line in a list. A clean-looking run has been
+    scrolled past with refusals in it before (07.09.26)."""
+    rep = last_batch.newest(last_batch.load(), st.session_state.report)
+    if not rep:
+        st.info("No batch has been run yet")
+        return
+    view = last_batch.batch_view(rep)
+    counts = view["counts"]
+
+    st.markdown(f"**Ran at:** {view['ran_at']}  \n"
+                f"**Output:** {view['output_names'] or '(no file written)'}")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Processed", counts["processed"])
+    c2.metric("Listed", counts["listed"])
+    c3.metric("Held back", counts["held_back"])
+    c4.metric("Failed", counts["failed"])
+
+    if view["needs_action"]:
+        st.subheader(f"Needs action ({len(view['needs_action'])})")
+        for e in view["needs_action"]:
+            icon, label = _STATUS_LABELS[e["status"]]
+            st.error(f"**{e['sku']}** · {label} — {e['reason']}", icon=icon)
+    if view["skipped"]:
+        st.subheader(f"Skipped ({len(view['skipped'])})")
+        for e in view["skipped"]:
+            icon, label = _STATUS_LABELS[e["status"]]
+            st.warning(f"**{e['sku']}** · {label} — {e['reason']}", icon=icon)
+    if not (view["needs_action"] or view["skipped"]):
+        st.success("Nothing was held back, failed or skipped. Every product listed.")
+
+    with st.expander(f"Listed ({len(view['listed'])})", expanded=False):
+        if view["listed"]:
+            st.markdown("\n".join(f"- {sku}" for sku in view["listed"]))
+        else:
+            st.caption("Nothing reached the upload file.")
+
+
+run_tab, last_batch_tab = st.tabs(["Run", "Last Batch"])
+
+with run_tab:
+    st.subheader("1. Your Anthropic API key")
+    api_key = st.text_input(
+        "API key",
+        type="password",
+        value=os.environ.get("ANTHROPIC_API_KEY", ""),
+        help="Get one at console.anthropic.com. Used only for this session — never saved to disk.",
         label_visibility="collapsed",
     )
+    with st.expander("Workspace ID (only needed for some keys)"):
+        st.caption(
+            "Most keys don't need this — leave it blank. It's only required if your API key is "
+            "\"identity-linked\" (a Personal or Service Account key) AND set to work across "
+            "multiple workspaces rather than restricted to just one. If you see an error mentioning "
+            "\"anthropic-workspace-id is required\", either paste that workspace's ID here (from "
+            "console.anthropic.com > Settings > Workspaces), or simpler: go create a new key there "
+            "restricted to a single workspace instead, which needs no ID at all."
+        )
+        workspace_id = st.text_input(
+            "Workspace ID",
+            value=os.environ.get("ANTHROPIC_WORKSPACE_ID", ""),
+            placeholder="wrkspc_...",
+            label_visibility="collapsed",
+        )
 
-st.subheader("2. Upload your files")
-col1, col2 = st.columns(2)
-with col1:
-    master_files = st.file_uploader(
-        "Stock Data File (.xlsx)", type=["xlsx"], accept_multiple_files=True,
-        help="Multiple files are merged — e.g. separate exports per supplier batch.",
+    st.subheader("2. Upload your files")
+    col1, col2 = st.columns(2)
+    with col1:
+        master_files = st.file_uploader(
+            "Stock Data File (.xlsx)", type=["xlsx"], accept_multiple_files=True,
+            help="Multiple files are merged — e.g. separate exports per supplier batch.",
+        )
+        template_files = st.file_uploader(
+            "eBay category listing template(s) (.xlsx) — optional override",
+            type=["xlsx"],
+            accept_multiple_files=True,
+            help=(
+                "Optional. By default every run already covers the full catalog automatically "
+                "(menswear/womenswear clothing, shoes and accessories, jewellery & watches, "
+                "homeware, and kidswear — see data/templates/, generated straight from eBay's "
+                "own API). Only upload a template here if you specifically want to override one "
+                "or more of those departments with a real .xlsx downloaded by hand from Seller "
+                "Hub > Create listings in bulk for a particular batch — an uploaded template "
+                "takes priority over the matching department default where its categories "
+                "overlap. One output file is produced per template (department default or "
+                "manually uploaded) that ends up with matched products."
+            ),
+        )
+        if not template_files:
+            st.caption("No manual template uploaded — using the full department template set (menswear/womenswear clothing, shoes, accessories, jewellery & watches, homeware, kidswear).")
+    with col2:
+        measurements_files = st.file_uploader(
+            "Orbitvu file (.csv)", type=["csv"], accept_multiple_files=True,
+            help="Multiple files are merged — e.g. separate exports per photography batch.",
+        )
+
+    st.subheader("3. Options")
+    opt_col1, opt_col2, opt_col3 = st.columns(3)
+    with opt_col1:
+        limit_enabled = st.checkbox("Test run only", value=True, help="Process just a few products first, to check quality before running the full batch.")
+    with opt_col2:
+        limit = st.number_input("Products to process", min_value=1, value=5, step=1, disabled=not limit_enabled)
+    with opt_col3:
+        workers = st.slider("Speed (parallel AI calls)", min_value=1, max_value=10, value=4)
+
+    price_percent = st.slider(
+        "Selling price (% of RRP)",
+        min_value=5, max_value=100, value=int(config.START_PRICE_RATIO * 100), step=5,
+        help="Applied to every listing in the batch — start price is this % of the item's RRP, "
+             "rounded to the nearest £5.",
     )
-    template_files = st.file_uploader(
-        "eBay category listing template(s) (.xlsx) — optional override",
-        type=["xlsx"],
-        accept_multiple_files=True,
-        help=(
-            "Optional. By default every run already covers the full catalog automatically "
-            "(menswear/womenswear clothing, shoes and accessories, jewellery & watches, "
-            "homeware, and kidswear — see data/templates/, generated straight from eBay's "
-            "own API). Only upload a template here if you specifically want to override one "
-            "or more of those departments with a real .xlsx downloaded by hand from Seller "
-            "Hub > Create listings in bulk for a particular batch — an uploaded template "
-            "takes priority over the matching department default where its categories "
-            "overlap. One output file is produced per template (department default or "
-            "manually uploaded) that ends up with matched products."
-        ),
-    )
-    if not template_files:
-        st.caption("No manual template uploaded — using the full department template set (menswear/womenswear clothing, shoes, accessories, jewellery & watches, homeware, kidswear).")
-with col2:
-    measurements_files = st.file_uploader(
-        "Orbitvu file (.csv)", type=["csv"], accept_multiple_files=True,
-        help="Multiple files are merged — e.g. separate exports per photography batch.",
+
+    force_regenerate = st.checkbox(
+        "Regenerate everything (ignore cache)",
+        value=False,
+        help="By default, products already processed in a previous run are reused for free. Check this to force fresh AI output for every product.",
     )
 
-st.subheader("3. Options")
-opt_col1, opt_col2, opt_col3 = st.columns(3)
-with opt_col1:
-    limit_enabled = st.checkbox("Test run only", value=True, help="Process just a few products first, to check quality before running the full batch.")
-with opt_col2:
-    limit = st.number_input("Products to process", min_value=1, value=5, step=1, disabled=not limit_enabled)
-with opt_col3:
-    workers = st.slider("Speed (parallel AI calls)", min_value=1, max_value=10, value=4)
+    photo_qc = st.checkbox(
+        "QC every listing against its photograph (slower)",
+        value=True,
+        help="After the listings are written, checks each one against its own main "
+             "photo and holds back anything the picture clearly contradicts. Adds "
+             "roughly ten to twenty minutes on a full batch. The free checks — an "
+             "aspect that disagrees with the title or the composition — always run.",
+    )
 
-price_percent = st.slider(
-    "Selling price (% of RRP)",
-    min_value=5, max_value=100, value=int(config.START_PRICE_RATIO * 100), step=5,
-    help="Applied to every listing in the batch — start price is this % of the item's RRP, "
-         "rounded to the nearest £5.",
-)
-
-force_regenerate = st.checkbox(
-    "Regenerate everything (ignore cache)",
-    value=False,
-    help="By default, products already processed in a previous run are reused for free. Check this to force fresh AI output for every product.",
-)
-
-photo_qc = st.checkbox(
-    "QC every listing against its photograph (slower)",
-    value=True,
-    help="After the listings are written, checks each one against its own main "
-         "photo and holds back anything the picture clearly contradicts. Adds "
-         "roughly ten to twenty minutes on a full batch. The free checks — an "
-         "aspect that disagrees with the title or the composition — always run.",
-)
-
-schedule_time_str = None
-schedule_invalid = False
-schedule_enabled = st.checkbox(
-    "Schedule listings for a future time (instead of starting immediately)",
-    value=False,
-    help="Listings go live at this time instead of immediately. GMT, on the "
-         "hour, and eBay allows up to three weeks ahead.",
-)
-if schedule_enabled:
-    default_dt = datetime.now() + timedelta(days=1)
-    sched_col1, sched_col2 = st.columns(2)
-    with sched_col1:
-        schedule_date = st.date_input("Start date", value=default_dt.date(), min_value=datetime.now().date())
-    with sched_col2:
-        schedule_time_val = st.time_input("Start time (GMT)", value=dt_time(default_dt.hour, 0))
-    chosen_dt = datetime.combine(schedule_date, schedule_time_val)
-    if chosen_dt <= datetime.now():
-        schedule_invalid = True
-    else:
-        schedule_time_str = chosen_dt.strftime(config.SCHEDULE_TIME_FORMAT)
-
-    # No "your template has no Schedule Time column" caption any more. The
-    # column is written whenever a time is set, whatever the template's own
-    # header row says — see build.build_row. 09.09.26.
-
-run_clicked = st.button("Generate eBay upload file", type="primary", use_container_width=True)
-
-st.divider()
-
-if run_clicked:
-    problems = []
-    if not api_key:
-        problems.append("Enter your Anthropic API key.")
-    if not master_files:
-        problems.append("Upload at least one Stock Data File.")
-    if not measurements_files:
-        problems.append("Upload at least one Orbitvu file.")
-    if schedule_enabled and schedule_invalid:
-        problems.append("Scheduled start must be in the future.")
-
-    if problems:
-        for p in problems:
-            st.error(p)
-    else:
-        os.environ["ANTHROPIC_API_KEY"] = api_key
-        if workspace_id.strip():
-            os.environ["ANTHROPIC_WORKSPACE_ID"] = workspace_id.strip()
+    schedule_time_str = None
+    schedule_invalid = False
+    schedule_enabled = st.checkbox(
+        "Schedule listings for a future time (instead of starting immediately)",
+        value=False,
+        help="Listings go live at this time instead of immediately. GMT, on the "
+             "hour, and eBay allows up to three weeks ahead.",
+    )
+    if schedule_enabled:
+        default_dt = datetime.now() + timedelta(days=1)
+        sched_col1, sched_col2 = st.columns(2)
+        with sched_col1:
+            schedule_date = st.date_input("Start date", value=default_dt.date(), min_value=datetime.now().date())
+        with sched_col2:
+            schedule_time_val = st.time_input("Start time (GMT)", value=dt_time(default_dt.hour, 0))
+        chosen_dt = datetime.combine(schedule_date, schedule_time_val)
+        if chosen_dt <= datetime.now():
+            schedule_invalid = True
         else:
-            os.environ.pop("ANTHROPIC_WORKSPACE_ID", None)
+            schedule_time_str = chosen_dt.strftime(config.SCHEDULE_TIME_FORMAT)
 
-        tmp_dir = Path(tempfile.mkdtemp(prefix="plh_"))
+        # No "your template has no Schedule Time column" caption any more. The
+        # column is written whenever a time is set, whatever the template's own
+        # header row says — see build.build_row. 09.09.26.
 
-        def _save_all(files):
-            paths = []
-            for f in files:
-                p = tmp_dir / f.name
-                p.write_bytes(f.getvalue())
-                paths.append(p)
-            return paths
+    run_clicked = st.button("Generate eBay upload file", type="primary", use_container_width=True)
 
-        master_paths = _save_all(master_files)
-        measurements_paths = _save_all(measurements_files)
-        template_paths = _save_all(template_files) if template_files else None
+    st.divider()
 
-        OUTPUT_DIR.mkdir(exist_ok=True)
-        output_path = OUTPUT_DIR / pipeline.default_output_filename()
+    if run_clicked:
+        problems = []
+        if not api_key:
+            problems.append("Enter your Anthropic API key.")
+        if not master_files:
+            problems.append("Upload at least one Stock Data File.")
+        if not measurements_files:
+            problems.append("Upload at least one Orbitvu file.")
+        if schedule_enabled and schedule_invalid:
+            problems.append("Scheduled start must be in the future.")
 
-        progress_bar = st.progress(0.0)
-        status_box = st.empty()
-        log_lines: list[str] = []
-
-        def on_progress(msg: str, frac: float | None) -> None:
-            log_lines.append(msg)
-            status_box.text("\n".join(log_lines[-8:]))
-            if frac is not None:
-                progress_bar.progress(min(max(frac, 0.0), 1.0))
-
-        try:
-            results, considered, uncovered, unmatched, failed, held_back, linnworks_notes = pipeline.run(
-                master_path=master_paths,
-                measurements_path=measurements_paths,
-                template_path=template_paths,
-                output_path=output_path,
-                cache_dir=CACHE_DIR,
-                limit=int(limit) if limit_enabled else None,
-                workers=int(workers),
-                force_regenerate=force_regenerate,
-                schedule_time=schedule_time_str,
-                price_percent=float(price_percent),
-                photo_qc=bool(photo_qc),
-                on_progress=on_progress,
-            )
-            persisted = []
-            for r in results:
-                persisted.append({
-                    "output_path": r.output_path,
-                    "rows": r.rows,
-                    "category_names": r.category_names,
-                })
-            st.session_state.results = persisted
-            st.session_state.num_considered = considered
-            total_rows = sum(len(r["rows"]) for r in persisted)
-
-            schedule_missed = bool(
-                schedule_time_str
-                and not any(row.get("Schedule Time") for r in persisted for row in r["rows"])
-            )
-            stem = Path(output_path).stem
-            st.session_state.report = {
-                "ran_at": datetime.now().strftime("%d.%m.%y %H:%M"),
-                "considered": considered,
-                "total_rows": total_rows,
-                "not_listed": len(failed) + len(uncovered) + len(unmatched) + len(held_back),
-                "held_back": list(held_back.reasons),
-                "held_back_path": held_back.path,
-                "linnworks_notes_count": len(linnworks_notes),
-                "linnworks_notes_path": linnworks_notes.path,
-                "failed": list(failed),
-                "uncovered": list(uncovered),
-                "unmatched": list(unmatched),
-                "schedule_time": schedule_time_str,
-                "schedule_missed": schedule_missed,
-                "output_names": ", ".join(Path(r["output_path"]).name for r in persisted),
-                "report_name": f"{stem}_run report.txt",
-            }
-
-            if persisted:
-                st.success(f"Done — generated {total_rows} listing(s) across {len(persisted)} output file(s).")
+        if problems:
+            for p in problems:
+                st.error(p)
+        else:
+            os.environ["ANTHROPIC_API_KEY"] = api_key
+            if workspace_id.strip():
+                os.environ["ANTHROPIC_WORKSPACE_ID"] = workspace_id.strip()
             else:
-                st.info("None of these products fall into a category covered by the template(s) you uploaded — no output file produced.")
-        except Exception as e:  # noqa: BLE001
-            st.error(f"Something went wrong: {e}")
-            with st.expander("Technical details"):
-                st.code(traceback.format_exc())
-        finally:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+                os.environ.pop("ANTHROPIC_WORKSPACE_ID", None)
 
-if st.session_state.results or st.session_state.report:
-    st.subheader("Results")
-    preview_cols = [
-        "Custom label (SKU)", "Title", "Description", "Category ID", "Category name",
-        "Start price", "Condition ID", "C:Brand",
-    ]
-    for r in (st.session_state.results or []):
-        if not Path(r["output_path"]).exists():
-            continue
-        categories_label = ", ".join(name.rsplit("/", 1)[-1] for name in r["category_names"])
-        st.markdown(f"**{Path(r['output_path']).name}** — {len(r['rows'])} listing(s): {categories_label}")
-        with open(r["output_path"], "rb") as f:
-            st.download_button(
-                f"Download {Path(r['output_path']).name}",
-                f,
-                file_name=Path(r["output_path"]).name,
-                mime="text/csv",
-                use_container_width=True,
-                key=r["output_path"],
-            )
-        preview_data = [
-            {c: row.get(c) for c in preview_cols if c in row} for row in r["rows"]
+            tmp_dir = Path(tempfile.mkdtemp(prefix="plh_"))
+
+            def _save_all(files):
+                paths = []
+                for f in files:
+                    p = tmp_dir / f.name
+                    p.write_bytes(f.getvalue())
+                    paths.append(p)
+                return paths
+
+            master_paths = _save_all(master_files)
+            measurements_paths = _save_all(measurements_files)
+            template_paths = _save_all(template_files) if template_files else None
+
+            OUTPUT_DIR.mkdir(exist_ok=True)
+            output_path = OUTPUT_DIR / pipeline.default_output_filename()
+
+            progress_bar = st.progress(0.0)
+            status_box = st.empty()
+            log_lines: list[str] = []
+
+            def on_progress(msg: str, frac: float | None) -> None:
+                log_lines.append(msg)
+                status_box.text("\n".join(log_lines[-8:]))
+                if frac is not None:
+                    progress_bar.progress(min(max(frac, 0.0), 1.0))
+
+            try:
+                results, considered, uncovered, unmatched, failed, held_back, linnworks_notes = pipeline.run(
+                    master_path=master_paths,
+                    measurements_path=measurements_paths,
+                    template_path=template_paths,
+                    output_path=output_path,
+                    cache_dir=CACHE_DIR,
+                    limit=int(limit) if limit_enabled else None,
+                    workers=int(workers),
+                    force_regenerate=force_regenerate,
+                    schedule_time=schedule_time_str,
+                    price_percent=float(price_percent),
+                    photo_qc=bool(photo_qc),
+                    on_progress=on_progress,
+                )
+                persisted = []
+                for r in results:
+                    persisted.append({
+                        "output_path": r.output_path,
+                        "rows": r.rows,
+                        "category_names": r.category_names,
+                    })
+                st.session_state.results = persisted
+                st.session_state.num_considered = considered
+                total_rows = sum(len(r["rows"]) for r in persisted)
+
+                schedule_missed = bool(
+                    schedule_time_str
+                    and not any(row.get("Schedule Time") for r in persisted for row in r["rows"])
+                )
+                stem = Path(output_path).stem
+                ran_at = datetime.now()
+                st.session_state.report = {
+                    "ran_at": ran_at.strftime("%d.%m.%y %H:%M"),
+                    # Full precision, so the Last Batch tab can tell which of
+                    # this session's report and the saved one is newer.
+                    "ran_at_iso": ran_at.isoformat(),
+                    "listed": [str(row.get("Custom label (SKU)"))
+                               for r in persisted for row in r["rows"]],
+                    "considered": considered,
+                    "total_rows": total_rows,
+                    "not_listed": len(failed) + len(uncovered) + len(unmatched) + len(held_back),
+                    "held_back": list(held_back.reasons),
+                    "held_back_path": held_back.path,
+                    "linnworks_notes_count": len(linnworks_notes),
+                    "linnworks_notes_path": linnworks_notes.path,
+                    "failed": list(failed),
+                    "uncovered": list(uncovered),
+                    "unmatched": list(unmatched),
+                    "schedule_time": schedule_time_str,
+                    "schedule_missed": schedule_missed,
+                    "output_names": ", ".join(Path(r["output_path"]).name for r in persisted),
+                    "report_name": f"{stem}_run report.txt",
+                }
+                # For the Last Batch tab. A failed save costs that tab its data,
+                # never the run itself, so it's reported and carried on from.
+                try:
+                    last_batch.save(st.session_state.report)
+                except OSError as e:
+                    st.warning(f"Couldn't save this run for the Last Batch tab: {e}")
+
+                if persisted:
+                    st.success(f"Done — generated {total_rows} listing(s) across {len(persisted)} output file(s).")
+                else:
+                    st.info("None of these products fall into a category covered by the template(s) you uploaded — no output file produced.")
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Something went wrong: {e}")
+                with st.expander("Technical details"):
+                    st.code(traceback.format_exc())
+            finally:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    if st.session_state.results or st.session_state.report:
+        st.subheader("Results")
+        preview_cols = [
+            "Custom label (SKU)", "Title", "Description", "Category ID", "Category name",
+            "Start price", "Condition ID", "C:Brand",
         ]
-        st.dataframe(preview_data, use_container_width=True, hide_index=True)
-        st.markdown("")
+        for r in (st.session_state.results or []):
+            if not Path(r["output_path"]).exists():
+                continue
+            categories_label = ", ".join(name.rsplit("/", 1)[-1] for name in r["category_names"])
+            st.markdown(f"**{Path(r['output_path']).name}** — {len(r['rows'])} listing(s): {categories_label}")
+            with open(r["output_path"], "rb") as f:
+                st.download_button(
+                    f"Download {Path(r['output_path']).name}",
+                    f,
+                    file_name=Path(r["output_path"]).name,
+                    mime="text/csv",
+                    use_container_width=True,
+                    key=r["output_path"],
+                )
+            preview_data = [
+                {c: row.get(c) for c in preview_cols if c in row} for row in r["rows"]
+            ]
+            st.dataframe(preview_data, use_container_width=True, hide_index=True)
+            st.markdown("")
 
-    # After the files, so the download buttons are the first thing reached,
-    # but on the same re-run-proof footing as them.
-    if st.session_state.report:
-        _render_report(st.session_state.report)
+        # After the files, so the download buttons are the first thing reached,
+        # but on the same re-run-proof footing as them.
+        if st.session_state.report:
+            _render_report(st.session_state.report)
+
+with last_batch_tab:
+    _render_last_batch()

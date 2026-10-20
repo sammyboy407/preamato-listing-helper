@@ -1339,6 +1339,67 @@ def test_missing_condition_notes_are_flagged_in_the_report():
           any(gap in m for m in messages(run(good_row(), size="8"))), False)
 
 
+def test_the_last_batch_report_round_trips_and_flags_what_did_not_list():
+    """20.10.26. The Last Batch tab reads the most recent run back off disk.
+    The saved file must read back exactly as written, and a held-back row
+    and a failed one must both arrive flagged, distinctly, ahead of the
+    listed SKUs."""
+    import tempfile
+    from src import last_batch
+
+    report = {
+        "ran_at": "20.10.26 14:05",
+        "ran_at_iso": "2026-10-20T14:05:12",
+        "considered": 5,
+        "total_rows": 2,
+        "not_listed": 3,
+        "listed": ["QTN01-001-002", "QTN01-001-001"],
+        "held_back": [("QTN01-001-010", ["no photos", "C:Size is required"])],
+        "held_back_path": None,
+        "failed": ["QTN01-001-020: required field 'C:Chest Size': no match"],
+        "uncovered": ["QTN01-001-030"],
+        "unmatched": [],
+        "output_names": "eBay upload 20.10.26.csv",
+    }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "last_batch_report.json"
+        check("no file yet reads as None", last_batch.load(path), None)
+        last_batch.save(report, path)
+        loaded = last_batch.load(path)
+        path.write_text("{not json")
+        check("a corrupt file reads as None, never raises", last_batch.load(path), None)
+
+    for key in ("ran_at", "ran_at_iso", "considered", "total_rows", "listed",
+                "failed", "uncovered", "output_names"):
+        check(f"round trip keeps {key}", loaded.get(key), report[key])
+    check("round trip keeps held back SKU and reasons",
+          [(sku, list(reasons)) for sku, reasons in loaded["held_back"]],
+          [("QTN01-001-010", ["no photos", "C:Size is required"])])
+    check("saved file carries per-SKU statuses",
+          [(e["sku"], e["status"]) for e in loaded["skus"]],
+          [("QTN01-001-020", "failed"), ("QTN01-001-010", "held_back"),
+           ("QTN01-001-030", "uncovered"),
+           ("QTN01-001-001", "listed"), ("QTN01-001-002", "listed")])
+
+    view = last_batch.batch_view(loaded)
+    check("needs action: failed and held back, both, distinctly",
+          [(e["sku"], e["status"], e["reason"]) for e in view["needs_action"]],
+          [("QTN01-001-020", "failed", "required field 'C:Chest Size': no match"),
+           ("QTN01-001-010", "held_back", "no photos; C:Size is required")])
+    check("uncovered is skipped, not in needs action",
+          [e["sku"] for e in view["skipped"]], ["QTN01-001-030"])
+    check("listed SKUs sit separately", view["listed"], ["QTN01-001-001", "QTN01-001-002"])
+    check("counts", view["counts"],
+          {"processed": 5, "listed": 2, "held_back": 1, "failed": 1,
+           "uncovered": 1, "unmatched": 0})
+
+    older = dict(report, ran_at_iso="2026-10-19T09:00:00")
+    check("the newer report wins", last_batch.newest(older, report)["ran_at_iso"],
+          report["ran_at_iso"])
+    check("no report at all", last_batch.newest(None, None), None)
+
+
 def test_a_new_listing_that_calls_itself_preloved_is_caught():
     """17.09.26. 18 rows of one batch of 75 went live at ConditionID 1000
     (New with tags) reading "This item is new and unused, but our inspection
