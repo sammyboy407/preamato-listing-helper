@@ -120,6 +120,7 @@ def _sizing_sources() -> list:
         aspect_matching._normalise_size_marker, aspect_matching.is_assumed_shoe_system,
         aspect_matching._eu_to_uk_table, aspect_matching._us_to_uk_table,
         aspect_matching.bare_number_system, aspect_matching.assumed_shoe_system,
+        aspect_matching.chest_size_from_continental,
     ]
 
 
@@ -148,6 +149,9 @@ def _sizing_fingerprint() -> str:
                              for b, s in aspect_matching.BRAND_SIZE_SCALES.items())))
     parts.append(repr(sorted(aspect_matching.BRAND_SIZE_SYSTEM.items())))
     parts.append(repr(aspect_matching.CONTINENTAL_SIZE_FLOOR))
+    parts.append(repr((aspect_matching.MENS_SUITS_CATEGORY_ID,
+                       aspect_matching.CONTINENTAL_SUIT_TO_CHEST_INCHES_OFFSET)))
+    parts.append(aspect_matching._CONTINENTAL_SUIT_SIZE_RE.pattern)
     parts.append(aspect_matching._HOUSE_NUMBER_WITH_WORD_RE.pattern)
     parts.append(repr(sorted(aspect_matching.LUGGAGE_SIZES.items())))
     parts.append(repr(sorted(aspect_matching.LUGGAGE_SUBCATS)))
@@ -542,7 +546,8 @@ def _resolve_measurement(name: str, product: Product) -> str | None:
     return raw or None
 
 
-def _resolve_size(name: str, product: Product, spec: ebay_template.AspectSpec) -> str | None:
+def _resolve_size(name: str, product: Product, spec: ebay_template.AspectSpec,
+                  category_id: str | None = None) -> str | None:
     m, meas = product.master, product.measurements
     # Sizing NEVER falls back to the Master File. The Master File's Size
     # column can be wrong — it's entered earlier in the process, before the
@@ -587,6 +592,14 @@ def _resolve_size(name: str, product: Product, spec: ebay_template.AspectSpec) -
     matched = aspect_matching.match_size(raw, spec.values)
     if matched:
         return matched
+    if name == "C:Chest Size" and str(category_id) == aspect_matching.MENS_SUITS_CATEGORY_ID:
+        # A suit's continental size is its chest in inches plus 10, and
+        # this category requires both — see
+        # aspect_matching.chest_size_from_continental. QTN01-001-296, a
+        # Dolce & Gabbana EU 50, dropped for want of this on its Chest Size.
+        derived = aspect_matching.chest_size_from_continental(raw, spec.values)
+        if derived:
+            return derived
     if spec.values:
         # eBay validates C:Size against its list on clothing. 08.09.26,
         # error 21920468 on eight of twenty-eight garments: "3" is not a
@@ -978,7 +991,7 @@ def generate_for_product(
         elif name in MEASUREMENT_ASPECTS:
             value = _resolve_measurement(name, product)
         elif _is_size_aspect(name):
-            value = _resolve_size(name, product, spec)
+            value = _resolve_size(name, product, spec, category.category_id)
             if not value and spec.level == "REQUIRED":
                 raise ValueError(f"required field {name!r}: {_size_failure_detail(name, product, spec)}")
         else:

@@ -591,6 +591,88 @@ def test_generated_listing_agrees_with_itself_end_to_end():
             FAILURES.append(f"end-to-end: title still contains the AI's invented {bad!r}: {title!r}")
 
 
+def test_a_continental_suit_size_also_fills_chest_size():
+    """Men's Suits & Tailoring (3001) requires C:Size AND C:Chest Size, and
+    Chest Size only takes inches. A continental suit size is the chest plus
+    10 (EU/IT 44->34in ... 54->44in, confirmed against real listings)."""
+    chest = [f"{n} in" for n in range(30, 65)] + ["96 cm"]
+    for continental, inches in ((44, 34), (46, 36), (48, 38), (50, 40), (52, 42), (54, 44)):
+        for system in ("EU", "IT"):
+            check(f"{system} {continental} suit -> chest",
+                  am.chest_size_from_continental(f"{system} {continental}", chest), f"{inches} in")
+    check("unspaced EU50 -> chest", am.chest_size_from_continental("EU50", chest), "40 in")
+    # A bare number on this category is already chest inches; converting it
+    # would ship a suit ten inches out.
+    check("bare 40 is not converted", am.chest_size_from_continental("40", chest), None)
+    check("FR is not converted", am.chest_size_from_continental("FR 50", chest), None)
+    check("letter is not converted", am.chest_size_from_continental("L", chest), None)
+    check("off eBay's list -> None", am.chest_size_from_continental("EU 99", chest), None)
+
+
+def test_a_continental_suit_lists_end_to_end():
+    """QTN01-001-296, a Dolce & Gabbana EU 50 suit, was dropped because its
+    Required C:Chest Size couldn't be matched. It must now list with C:Size
+    "EU 50" and C:Chest Size "40 in" — and only in category 3001."""
+    import tempfile
+    from src import ai_client, content_generator, ebay_template
+    from src.data_loader import Product
+
+    templates_dir = Path(__file__).resolve().parent.parent / "data" / "templates"
+    menswear = templates_dir / "menswear_clothing.json"
+    if not menswear.exists():
+        print("  (skipped end-to-end suit check: data/templates not present in this checkout)")
+        return
+
+    template = ebay_template.load_template(menswear)
+    category = template.category_by_id("3001")  # Men's Suits & Tailoring
+    product = Product(
+        sku="QTN01-001-296",
+        master={"Brand": "DOLCE & GABBANA", "Gender": "MEN", "Colour": "Black",
+                "Category": "Clothing", "SubCat2": "Suits", "Rounded RRP": 2450,
+                "Country of Origin": "ITA",
+                "Clean Title Description": "DOLCE & GABBANA TWO PIECE SUIT"},
+        measurements={"Size": "EU 50", "Description": "Good condition."},
+    )
+
+    def fake_ai(system, user, tool_name, input_schema, **kwargs):
+        props = input_schema["properties"]["item_specifics"]["properties"]
+        required = set(input_schema["properties"]["item_specifics"].get("required", []))
+        specifics = {}
+        for name, spec in props.items():
+            if name not in required:
+                continue
+            if spec.get("type") == "array":
+                specifics[name] = spec["items"]["enum"][:1]
+            elif "enum" in spec:
+                specifics[name] = spec["enum"][0]
+            else:
+                specifics[name] = "Wool"
+        return {"title": "Dolce & Gabbana Two Piece Suit Black EU 50 RRP 2450",
+                "condition_id": category.conditions[0][0],
+                "condition_description": "Good condition.",
+                "material_summary": "Wool",
+                "item_specifics": specifics}
+
+    original = ai_client.call_structured
+    ai_client.call_structured = fake_ai
+    try:
+        with tempfile.TemporaryDirectory() as cache_dir:
+            result = content_generator.generate_for_product(
+                product, category, template, cache_dir, force=True)
+    finally:
+        ai_client.call_structured = original
+
+    specifics = result["item_specifics"]
+    check("suit end-to-end: C:Size", specifics.get("C:Size"), "EU 50")
+    check("suit end-to-end: C:Chest Size", specifics.get("C:Chest Size"), "40 in")
+
+    # Outside 3001 the derivation never runs: an optional Chest Size
+    # elsewhere stays blank rather than being filled by this rule.
+    spec = template.aspects["3001"]["C:Chest Size"]
+    check("chest derivation is 3001-only",
+          content_generator._resolve_size("C:Chest Size", product, spec, "57988"), None)
+
+
 def test_the_brand_rule_survives_the_whole_pipeline():
     """The unit checks above prove match_shoe_size_uk honours the brand. This
     one proves the brand actually REACHES it.

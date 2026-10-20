@@ -619,6 +619,34 @@ BRAND_SIZE_SYSTEM = {
 CONTINENTAL_SIZE_FLOOR = 30
 
 _BARE_NUMBER_SIZE_RE = re.compile(r"^\s*(\d{1,3})\s*$")
+
+
+# Men's Suits & Tailoring (3001) requires BOTH C:Size and C:Chest Size, in
+# different systems: C:Size takes the continental size ("EU 50"), C:Chest
+# Size only takes inches ("40 in"), nothing continental. So a suit recorded
+# as "EU 50" matched C:Size and then failed Chest Size, and the row dropped.
+#
+# A continental suit size is the chest in inches plus 10, confirmed against
+# real listings: EU/IT 44->34in, 46->36in, 48->38in, 50->40in, 52->42in,
+# 54->44in. Only an explicitly marked EU or IT size is converted. A bare
+# number on this category's list is already chest inches (30-40), so
+# converting one would ship a suit ten inches out.
+# See claude/EBAY_MENS_SUITS_3001_TWO_SIZE_ASPECTS.md in the Claude project.
+MENS_SUITS_CATEGORY_ID = "3001"
+CONTINENTAL_SUIT_TO_CHEST_INCHES_OFFSET = 10
+_CONTINENTAL_SUIT_SIZE_RE = re.compile(r"^\s*(EU|IT)\s*(\d{2})\s*$", re.IGNORECASE)
+
+
+def chest_size_from_continental(raw, valid_values) -> str | None:
+    """An "EU 50" suit -> "40 in", returned only when eBay's own Chest Size list has
+    it. None for anything else: a bare number, a letter, an FR size, or a
+    result off the list."""
+    m = _CONTINENTAL_SUIT_SIZE_RE.match(str(raw or ""))
+    if not m or not valid_values:
+        return None
+    inches = int(m.group(2)) - CONTINENTAL_SUIT_TO_CHEST_INCHES_OFFSET
+    wanted = f"{inches} in"
+    return wanted if wanted in valid_values else None
 _HOUSE_NUMBER_WITH_WORD_RE = re.compile(
     r"^\s*\d{1,3}\s*[-/(,]\s*([A-Za-z][A-Za-z /-]*?)\s*\)?\s*$")
 
