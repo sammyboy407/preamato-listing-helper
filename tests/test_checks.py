@@ -1267,6 +1267,58 @@ def test_condition_description_is_dropped_for_new_with_box():
               sent_for(condition_id), "Comes without its box.")
 
 
+def test_the_condition_note_leads_the_description_and_fills_condition_notes():
+    """20.10.26. The condition note opens the description in bold, and goes
+    on the listing as C:Condition Notes, cut to eBay's 65-character limit
+    on a custom item specific at a word boundary. A condition 1000 item has
+    no note, so it gets neither."""
+    from src import build
+
+    def row_for(condition_id, note):
+        product = make_product({"Size": "8", "Description": "Inspected."}, brand="SIMONE ROCHA")
+        product.master.update({"Rounded RRP": 695, "Colour": "White", "Season": "AW25",
+                               "Category": "Ready to Wear", "Gender": "WOMEN"})
+        ai_result = {"title": "SIMONE ROCHA Womens Tiered Mini Skirt White 8 RRP 695",
+                     "condition_id": condition_id,
+                     "condition_description": note,
+                     "material_summary": "Silk", "item_specifics": {}}
+        return build.build_row(product, ai_result, CATEGORY, make_template(), {},
+                               price_percent=50.0)
+
+    # Short: fits whole.
+    short = "Excellent condition, worn once."
+    row = row_for(3000, short)
+    check("short note: bold first line of the description",
+          row["Description"].startswith(f"<b>{short}</b><br>\n"), True)
+    check("short note: rest of the description follows unchanged",
+          "Condition: " in row["Description"] and row["Description"].count("<b>") == 1, True)
+    check("short note: C:Condition Notes is the whole note",
+          row[build.CONDITION_NOTES_ASPECT], short)
+
+    # Long: cut at the last whole word inside 65 characters.
+    long_note = ("Very good pre-owned condition with light wear to the hem and a "
+                 "faint mark on the inside of the waistband")
+    row = row_for(3000, long_note)
+    capped = row[build.CONDITION_NOTES_ASPECT]
+    check("long note: bold line carries the full note",
+          row["Description"].startswith(f"<b>{long_note}</b><br>\n"), True)
+    check("long note: capped value",
+          capped, "Very good pre-owned condition with light wear to the hem and a")
+    check("long note: within 65 characters", len(capped) <= 65, True)
+    check("long note: ends on a whole word of the original",
+          long_note.startswith(capped) and long_note[len(capped)] == " ", True)
+    check("long note: no ellipsis", capped.endswith(("...", "…")), False)
+    # A cut that lands just after a comma doesn't leave the comma hanging.
+    check("long note: dangling comma dropped",
+          build.condition_notes_aspect("Good condition overall, " + "x" * 50 + " more"),
+          "Good condition overall")
+
+    # New (condition 1000): no note, so neither change applies.
+    row = row_for(1000, "Brand new with tags.")
+    check("new item: no bold line", "<b>" in row["Description"], False)
+    check("new item: no C:Condition Notes value", row.get(build.CONDITION_NOTES_ASPECT), None)
+
+
 def test_a_new_listing_that_calls_itself_preloved_is_caught():
     """17.09.26. 18 rows of one batch of 75 went live at ConditionID 1000
     (New with tags) reading "This item is new and unused, but our inspection

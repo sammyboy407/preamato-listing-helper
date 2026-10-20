@@ -49,6 +49,13 @@ CONDITION_NO_DESCRIPTION = 1000
 # in Linnworks is set up to read. Sammy, 15.10.26.
 LINNWORKS_CONDITION_PROPERTY_NAME = "ConditionNotes"
 
+# The condition note as an item specific on the listing itself, alongside
+# the ConditionDescription field. eBay caps a custom item specific's value
+# at 65 characters, so a longer note is cut back to the last whole word
+# that fits — never mid-word, never with an ellipsis. Sammy, 20.10.26.
+CONDITION_NOTES_ASPECT = "C:Condition Notes"
+CUSTOM_ASPECT_MAX_CHARS = 65
+
 from . import aspect_matching, brand_blurb, config, ebay_template
 from .data_loader import Product, split_image_urls
 
@@ -84,6 +91,7 @@ def build_description(
     category: ebay_template.CategorySpec,
     template: ebay_template.EbayTemplate,
     blurb_cache: dict[str, str],
+    condition_note: str | None = None,
 ) -> str:
     m, meas = product.master, product.measurements
     brand = m.get("Brand") or ""
@@ -182,6 +190,12 @@ def build_description(
     ]
 
     lines = [paragraph, ""] + [line + " " for line in spec_lines] + [config.SHIPPING_LINE]
+    # The condition note leads the description in bold, so it's the first
+    # thing a buyer reads. Only passed for a listing that carries one — the
+    # same ConditionDescription build_row sends, so a condition 1000 item
+    # gets no bold line. Sammy, 20.10.26.
+    if condition_note:
+        lines = [f"<b>{condition_note}</b>"] + lines
     # eBay renders Description as HTML — a plain "\n" is whitespace that
     # gets collapsed on the live listing page, so line breaks only actually
     # show up in the CSV/spreadsheet, never on eBay itself. <br> forces a
@@ -198,6 +212,24 @@ def build_description(
     description = aspect_matching.scrub_internal_references(description)
     description = aspect_matching.scrub_generic_trademarks(description)
     return description
+
+
+def condition_notes_aspect(note) -> str | None:
+    """The condition note cut to eBay's 65-character limit on a custom item
+    specific, at a word boundary. A note that already fits goes through
+    whole; a longer one keeps every whole word that fits, with any comma or
+    dash left dangling at the cut taken off. No ellipsis, no partial word.
+    None when there's no note."""
+    text = " ".join(str(note or "").split())
+    if len(text) <= CUSTOM_ASPECT_MAX_CHARS:
+        return text or None
+    kept = ""
+    for word in text.split(" "):
+        candidate = f"{kept} {word}" if kept else word
+        if len(candidate) > CUSTOM_ASPECT_MAX_CHARS:
+            break
+        kept = candidate
+    return kept.rstrip(" ,;:-") or None
 
 
 def compute_start_price(rrp, price_percent: float) -> float | None:
@@ -235,6 +267,17 @@ def build_row(
 
     pic_urls = split_image_urls(meas.get("Images 2D link"))
 
+    # eBay ignores ConditionDescription on condition 1000 ("New with
+    # box") and returns warning 21919111 for every such row: 32 of 282 on
+    # 06.09.26, which is a third of the warnings in the results file and
+    # makes a real one harder to see. Nothing is lost by omitting it —
+    # the same text is already a "Condition:" line in the description
+    # body, which is what a buyer actually reads. The bold description
+    # line and C:Condition Notes follow the same rule.
+    condition_note = (
+        None if str(ai_result.get("condition_id")) == str(CONDITION_NO_DESCRIPTION)
+        else ai_result.get("condition_description"))
+
     row = {
         "*Action(SiteID=UK|Country=GB|Currency=GBP|Version=1193)": config.ACTION,
         "Custom label (SKU)": product.sku,
@@ -246,16 +289,9 @@ def build_row(
         "Quantity": m.get("Qty") or config.QUANTITY_DEFAULT,
         "Item photo URL": "|".join(pic_urls),
         "Condition ID": ai_result.get("condition_id"),
-        # eBay ignores ConditionDescription on condition 1000 ("New with
-        # box") and returns warning 21919111 for every such row: 32 of 282 on
-        # 06.09.26, which is a third of the warnings in the results file and
-        # makes a real one harder to see. Nothing is lost by omitting it —
-        # the same text is already a "Condition:" line in the description
-        # body, which is what a buyer actually reads.
-        "ConditionDescription": (
-            None if str(ai_result.get("condition_id")) == str(CONDITION_NO_DESCRIPTION)
-            else ai_result.get("condition_description")),
-        "Description": build_description(product, ai_result, category, template, blurb_cache),
+        "ConditionDescription": condition_note,
+        "Description": build_description(product, ai_result, category, template, blurb_cache,
+                                         condition_note=condition_note),
         "Format": config.FORMAT,
         "Duration": config.DURATION,
         "Best Offer Enabled": config.BEST_OFFER_ENABLED,
@@ -269,6 +305,10 @@ def build_row(
 
     for field_name, value in ai_result.get("item_specifics", {}).items():
         row[field_name] = value
+
+    # After the item specifics, so this is the value that wins. Blank on a
+    # condition 1000 item, same as ConditionDescription.
+    row[CONDITION_NOTES_ASPECT] = condition_notes_aspect(condition_note)
 
     # Written whenever a schedule time was asked for, not only when the
     # template's own header row happens to name the column.
