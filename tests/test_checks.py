@@ -1290,8 +1290,9 @@ def test_the_condition_note_leads_the_description_and_fills_condition_notes():
     row = row_for(3000, short)
     check("short note: bold first line of the description",
           row["Description"].startswith(f"<b>{short}</b><br>\n"), True)
-    check("short note: rest of the description follows unchanged",
-          "Condition: " in row["Description"] and row["Description"].count("<b>") == 1, True)
+    check("short note: no second Condition: line further down",
+          "Condition: " in row["Description"], False)
+    check("short note: the note appears once", row["Description"].count(short), 1)
     check("short note: C:Condition Notes is the whole note",
           row[build.CONDITION_NOTES_ASPECT], short)
 

@@ -108,12 +108,6 @@ def build_description(
     paragraph = (blurb_cache.get(brand_blurb.blurb_key(brand, tier))
                  or blurb_cache.get(brand, ""))
 
-    condition_notes = (meas.get("Description") or "").strip()
-    condition_line = (
-        ai_result.get("condition_description") if condition_notes
-        else config.CONDITION_PLACEHOLDER
-    )
-
     specifics = ai_result.get("item_specifics", {})
     colour_key = _primary_colour_key(category.category_id, template)
     colour = specifics.get(colour_key, "") if colour_key else ""
@@ -175,7 +169,6 @@ def build_description(
 
     # Trailing space on each spec line, matching the exact format requested.
     spec_lines = [
-        f"Condition: {condition_line}",
         f"Brand: {brand}",
         f"Style: {style}",
         f"Type: {item_type}",
@@ -193,7 +186,8 @@ def build_description(
     # The condition note leads the description in bold, so it's the first
     # thing a buyer reads. Only passed for a listing that carries one — the
     # same ConditionDescription build_row sends, so a condition 1000 item
-    # gets no bold line. Sammy, 20.10.26.
+    # gets no bold line. This replaced the old "Condition:" spec line
+    # entirely, rather than repeating the note further down. Sammy, 20.10.26.
     if condition_note:
         lines = [f"<b>{condition_note}</b>"] + lines
     # eBay renders Description as HTML — a plain "\n" is whitespace that

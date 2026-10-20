@@ -72,11 +72,3 @@ MODEL = "claude-sonnet-5"
 
 # Fixed closing line every Description ends with.
 SHIPPING_LINE = "Ships within 24 to 48 hours, fully insured tracked delivery"
-
-# Used in the Description's "Condition:" line when the measurements file has
-# no condition/defect notes for this SKU at all — flags the gap rather than
-# inventing a condition.
-CONDITION_PLACEHOLDER = (
-    "[add from scan sheet defect column, no defect info was in this data row, "
-    "please confirm against the physical item before listing]"
-)
