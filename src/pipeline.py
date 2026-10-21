@@ -241,6 +241,7 @@ def run(
     combine_output: bool = True,
     photo_qc: bool = False,
     on_progress: ProgressFn = _noop,
+    products: list | None = None,
 ) -> tuple[list[TemplateResult], int, list[str], list[str], list[str], "HeldBack"]:
     """Runs the full pipeline. Returns (template_results, num_products_considered,
     uncovered_skus, unmatched_skus, failed, held_back) — uncovered_skus lists
@@ -283,7 +284,12 @@ def run(
     inconvenient for a real bulk upload, where one file covering every
     category is normal (a real eBay bulk template already mixes many
     categories' rows in one sheet). Defaults to True; set False to get the
-    old one-file-per-template behaviour back."""
+    old one-file-per-template behaviour back.
+
+    products, when given, is used instead of loading master_path and
+    measurements_path: the Last Batch tab's Quick Edit re-runs only the
+    SKUs someone corrected, from their edited data, through this same
+    pipeline and every check in it (see last_batch.py)."""
     Path(cache_dir).mkdir(parents=True, exist_ok=True)
     template_paths = template_path if isinstance(template_path, list) else ([template_path] if template_path else [])
     used_default_departments = False
@@ -294,7 +300,10 @@ def run(
             used_default_departments = True
 
     on_progress("Loading source files...", 0.0)
-    products, unmatched_skus = data_loader.load_products(master_path, measurements_path)
+    if products is None:
+        products, unmatched_skus = data_loader.load_products(master_path, measurements_path)
+    else:
+        unmatched_skus = []
     if limit:
         products = products[:limit]
     if not products:
@@ -435,7 +444,7 @@ def run(
             "None of the matched products fall into a category covered by any given "
             "template — no output file produced.", 1.0
         )
-        return [], 0, uncovered_skus, unmatched_skus, [], HeldBack()
+        return [], 0, uncovered_skus, unmatched_skus, [], HeldBack(), LinnworksNotes()
 
     # (brand, condition tier) rather than brand alone: a brand with both new
     # and preloved stock in one batch needs a paragraph for each, or the new

@@ -1392,12 +1392,206 @@ def test_the_last_batch_report_round_trips_and_flags_what_did_not_list():
     check("listed SKUs sit separately", view["listed"], ["QTN01-001-001", "QTN01-001-002"])
     check("counts", view["counts"],
           {"processed": 5, "listed": 2, "held_back": 1, "failed": 1,
-           "uncovered": 1, "unmatched": 0})
+           "uncovered": 1, "unmatched": 0, "fixed": 0})
 
     older = dict(report, ran_at_iso="2026-10-19T09:00:00")
     check("the newer report wins", last_batch.newest(older, report)["ran_at_iso"],
           report["ran_at_iso"])
     check("no report at all", last_batch.newest(None, None), None)
+
+
+def test_quick_edit_keeps_source_values_and_applies_only_real_edits():
+    """Quick Edit saves a failed or held-back SKU's source rows, shows them
+    as text, and turns the edited text back into values. A number must
+    come back a number (price and RRP are computed from it), an untouched
+    field must come back exactly as it was, and an empty cell must stay
+    empty rather than becoming the text "None"."""
+    import json
+    from datetime import datetime as _dt
+    from src import last_batch
+
+    product = Product(
+        sku="QTN01-001-050",
+        master={"SKU": "QTN01-001-050", "Rounded RRP": 695, "Weight": 1.5,
+                "Received": _dt(2026, 10, 1), "Notes": None, None: "orphan",
+                "Bad": float("nan")},
+        measurements={"Size": "EU 99", "Description": "Good condition."},
+    )
+    snap = last_batch.snapshot(product)
+    check("snapshot is JSON-safe", json.loads(json.dumps(snap)) == snap, True)
+    check("a number stays a number", snap["master"]["Rounded RRP"], 695)
+    check("a date becomes text", snap["master"]["Received"], "2026-10-01 00:00:00")
+    check("NaN becomes empty", snap["master"]["Bad"], None)
+    check("a header-less column is dropped", "None" in snap["master"], False)
+
+    texts = {k: last_batch.as_text(v) for k, v in snap["master"].items()}
+    check("empty shows as blank, not 'None'", texts["Notes"], "")
+    unchanged, changed = last_batch.apply_edits(snap["master"], texts)
+    check("nothing edited: reported unchanged", changed, False)
+    check("nothing edited: values identical", unchanged, snap["master"])
+
+    edited, changed = last_batch.apply_edits(
+        snap["master"], dict(texts, **{"Rounded RRP": "650", "Weight": "2.25", "Notes": "x"}))
+    check("an edit is reported", changed, True)
+    check("an int field edited stays an int", edited["Rounded RRP"], 650)
+    check("a float field edited stays a float", edited["Weight"], 2.25)
+    check("a text edit is text", edited["Notes"], "x")
+    cleared, _ = last_batch.apply_edits(snap["master"], dict(texts, **{"Rounded RRP": ""}))
+    check("clearing a field empties it", cleared["Rounded RRP"], None)
+
+    report = {
+        "ran_at_iso": "2026-10-20T14:05:12",
+        "listed": ["A-1"],
+        "failed": ["F-1: required field 'C:UK Shoe Size': no match", "F-2: API error"],
+        "held_back": [["H-1", ["no photos"]]],
+        "uncovered": [], "unmatched": [],
+        "products": {"F-1": {}, "F-2": {}, "H-1": {}},
+    }
+    fixed = last_batch.apply_fix(
+        report, {"F-1": {"master": {}, "measurements": {"Size": "EU 45"}},
+                 "H-1": {"master": {}, "measurements": {}}},
+        listed=["F-1"], held_back=[("H-1", ["C:Colour is required"])], failed=[],
+        uncovered=[], output_name="Ebay-Upload-FIXED.csv",
+        files=["/out/Ebay-Upload-FIXED.csv", None], updated_at="2026-10-20T15:00:00")
+    view = last_batch.batch_view(fixed)
+    check("fixed SKU leaves needs action and shows as fixed",
+          [(e["sku"], e["status"]) for e in view["fixed"]], [("F-1", "fixed")])
+    check("a re-run SKU that still fails carries its NEW reason",
+          [(e["sku"], e["reason"]) for e in view["needs_action"]],
+          [("F-2", "API error"), ("H-1", "C:Colour is required")])
+    check("a SKU not re-run is untouched", "F-2: API error" in fixed["failed"], True)
+    check("the edited data replaces the saved snapshot",
+          fixed["products"]["F-1"]["measurements"], {"Size": "EU 45"})
+    check("only real files are kept", fixed["fixed_files"], ["/out/Ebay-Upload-FIXED.csv"])
+    check("not listed recounted", fixed["not_listed"], 2)
+    check("the updated copy wins over the original",
+          last_batch.newest(report, fixed)["updated_at"], "2026-10-20T15:00:00")
+
+
+def test_quick_edit_reruns_corrected_skus_through_the_whole_pipeline():
+    """End to end: a failed SKU (a size eBay has no value for) and a
+    held-back one (no photos) are corrected from their saved source data
+    and re-run through pipeline.run(products=...). Both must reach the
+    upload file, and the original files must never be read again, since
+    the app deletes them as soon as the first run ends."""
+    import tempfile
+    from src import ai_client, brand_blurb, data_loader, last_batch, pipeline
+
+    templates_dir = pathlib.Path(__file__).resolve().parent.parent / "data" / "templates"
+    if not (templates_dir / "menswear_shoes.json").exists():
+        print("  (skipped: data/templates not present in this checkout)")
+        return
+
+    def make(sku, size, images):
+        return Product(
+            sku=sku,
+            master={"Brand": "ROA", "Gender": "MEN", "Colour": "Brown",
+                    "Category": "Footwear", "SubCat2": "Boots", "Rounded RRP": 395,
+                    "Country of Origin": "ITA", "Clean Title Description": "ROA HIKING BOOT"},
+            measurements={"Size": size, "Description": "Good condition.",
+                          "Images 2D link": images},
+        )
+
+    photos = "http://a|http://b|http://c"
+    failing = make("FAIL-001", "EU 99", photos)   # no UK size for an EU 99: fails
+    held = make("HELD-001", "EU 45", "")          # no photos: held back
+
+    def fake_ai(system, user, tool_name, input_schema, **kwargs):
+        if tool_name == "pick_category":
+            return {"category_id": "11498", "reasoning": "stub"}
+        props = input_schema["properties"]["item_specifics"]["properties"]
+        required = set(input_schema["properties"]["item_specifics"].get("required", []))
+        specifics = {}
+        for name, spec in props.items():
+            if name not in required:
+                continue
+            if spec.get("type") == "array":
+                specifics[name] = spec["items"]["enum"][:1]
+            elif "enum" in spec:
+                specifics[name] = spec["enum"][0]
+            else:
+                specifics[name] = "Leather"
+        return {"title": "ROA Hiking Boots Brown Suede EU 45 RRP 395",
+                "condition_id": 3000,
+                "condition_description": "Good condition, light preloved wear.",
+                "material_summary": "Suede", "item_specifics": specifics}
+
+    def no_files(*a, **k):
+        raise AssertionError("Quick Edit read the original files again")
+
+    def run(products, cache_dir, out):
+        return pipeline.run(
+            master_path="unused", measurements_path="unused",
+            template_path=[str(templates_dir / "menswear_shoes.json")],
+            output_path=out, cache_dir=cache_dir, workers=1,
+            force_regenerate=True, products=products)
+
+    originals = (ai_client.call_structured, data_loader.load_products, brand_blurb.build_blurbs)
+    ai_client.call_structured = fake_ai
+    data_loader.load_products = no_files
+    brand_blurb.build_blurbs = lambda brands, cache_dir: {
+        brand_blurb.blurb_key(*(b if isinstance(b, tuple) else (b,))): ""
+        for b in brands}
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            first = run([failing, held], d, pathlib.Path(d) / "Upload.csv")
+            _results, _c, _u, _m, failed, held_back, _l = first
+            check("first run: the bad size failed",
+                  [f.partition(": ")[0] for f in failed], ["FAIL-001"])
+            check("first run: no photos held back", list(held_back.skus), ["HELD-001"])
+
+            snaps = {p.sku: last_batch.snapshot(p) for p in (failing, held)}
+            fixes = {"FAIL-001": {"Size": "EU 45"}, "HELD-001": {"Images 2D link": photos}}
+            edits = {}
+            for sku, change in fixes.items():
+                texts = {k: last_batch.as_text(v) for k, v in snaps[sku]["measurements"].items()}
+                measurements, changed = last_batch.apply_edits(
+                    snaps[sku]["measurements"], dict(texts, **change))
+                check(f"{sku}: edit detected", changed, True)
+                edits[sku] = {"master": snaps[sku]["master"], "measurements": measurements}
+
+            products = [last_batch.product_from_snapshot(s, e) for s, e in edits.items()]
+            results, _c, uncovered, _m, failed, held_back, _l = run(
+                products, d, pathlib.Path(d) / "Upload-FIXED.csv")
+            listed = sorted(str(row.get("Custom label (SKU)")) for r in results for row in r.rows)
+            check("re-run: both corrected SKUs listed", listed, ["FAIL-001", "HELD-001"])
+            check("re-run: nothing failed or held", (list(failed), list(held_back.skus)), ([], []))
+            check("re-run: FIXED file written",
+                  [pathlib.Path(r.output_path).name for r in results], ["Upload-FIXED.csv"])
+    finally:
+        ai_client.call_structured, data_loader.load_products, brand_blurb.build_blurbs = originals
+
+
+def test_a_run_with_nothing_covered_still_returns_seven_values():
+    """pipeline.run's early return, when no product falls into any
+    template's categories, returned six values after the Linnworks notes
+    became the seventh (15.10.26), so every caller's unpacking would have
+    crashed on exactly that run. Found 20.10.26 while adding Quick Edit,
+    which can move a SKU into an uncovered category."""
+    import tempfile
+    from src import ai_client, category_mapping, pipeline
+
+    templates_dir = pathlib.Path(__file__).resolve().parent.parent / "data" / "templates"
+    if not (templates_dir / "menswear_shoes.json").exists():
+        print("  (skipped: data/templates not present in this checkout)")
+        return
+    product = Product(sku="NOWHERE-001",
+                      master={"Brand": "ROA", "Gender": "MEN", "Category": "Footwear",
+                              "SubCat2": "Boots", "Rounded RRP": 395},
+                      measurements={"Size": "EU 45", "Description": "Good condition."})
+    originals = (ai_client.call_structured, category_mapping.lookup)
+    ai_client.call_structured = lambda *a, **k: {"category_id": "", "reasoning": "stub"}
+    category_mapping.lookup = lambda *a, **k: None
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            returned = pipeline.run(
+                master_path="unused", measurements_path="unused",
+                template_path=[str(templates_dir / "menswear_shoes.json")],
+                output_path=pathlib.Path(d) / "Upload.csv", cache_dir=d, products=[product])
+    finally:
+        ai_client.call_structured, category_mapping.lookup = originals
+    check("seven values even when nothing is covered", len(returned), 7)
+    check("the product is reported uncovered", returned[2], ["NOWHERE-001"])
 
 
 def test_a_new_listing_that_calls_itself_preloved_is_caught():

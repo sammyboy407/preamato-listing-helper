@@ -14,10 +14,11 @@ from datetime import datetime, time as dt_time, timedelta
 from pathlib import Path
 
 import openpyxl
+import pandas as pd
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from src import branding, config, ebay_template, last_batch, pipeline  # noqa: E402
+from src import branding, config, data_loader, ebay_template, last_batch, pipeline  # noqa: E402
 
 APP_DIR = Path(__file__).resolve().parent
 CACHE_DIR = APP_DIR / "cache"
@@ -343,11 +344,101 @@ _STATUS_LABELS = {
 }
 
 
-def _render_last_batch() -> None:
+def _field_editor(row: dict, key: str) -> dict:
+    """One source row as an editable Field | Value table. Returns
+    {field: text}; last_batch.apply_edits turns the text back into values."""
+    frame = pd.DataFrame({"Field": list(row),
+                          "Value": [last_batch.as_text(v) for v in row.values()]})
+    edited = st.data_editor(frame, key=key, hide_index=True, use_container_width=True,
+                            disabled=["Field"])
+    return {field: ("" if pd.isna(value) else str(value))
+            for field, value in zip(edited["Field"], edited["Value"])}
+
+
+def _rerun_edited(rep: dict, edits: dict, api_key: str, workspace_id: str) -> None:
+    """Re-runs the edited SKUs through pipeline.run, the same AI and every
+    same check as a normal run, from their corrected data. Whatever passes
+    goes into a new FIXED upload file; whatever doesn't stays in Needs
+    action with its new reason."""
+    if not api_key:
+        st.error("Enter your Anthropic API key in the Run tab first.")
+        return
+    os.environ["ANTHROPIC_API_KEY"] = api_key
+    if workspace_id.strip():
+        os.environ["ANTHROPIC_WORKSPACE_ID"] = workspace_id.strip()
+    else:
+        os.environ.pop("ANTHROPIC_WORKSPACE_ID", None)
+
+    # The batch's own schedule, unless it has already passed: eBay refuses
+    # a schedule time in the past, so those start immediately instead.
+    schedule = rep.get("schedule_time")
+    schedule_dropped = bool(
+        schedule and datetime.strptime(schedule, config.SCHEDULE_TIME_FORMAT) <= datetime.now())
+    if schedule_dropped:
+        schedule = None
+
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    output_path = OUTPUT_DIR / f"{Path(pipeline.default_output_filename()).stem}-FIXED.csv"
+    products = [last_batch.product_from_snapshot(sku, snap) for sku, snap in edits.items()]
+    progress_bar = st.progress(0.0)
+    status_box = st.empty()
+
+    def on_progress(msg: str, frac: float | None) -> None:
+        status_box.text(msg)
+        if frac is not None:
+            progress_bar.progress(min(max(frac, 0.0), 1.0))
+
+    try:
+        results, _considered, uncovered, _unmatched, failed, held_back, linnworks_notes = pipeline.run(
+            master_path=None,
+            measurements_path=None,
+            template_path=None,
+            output_path=output_path,
+            cache_dir=CACHE_DIR,
+            # The cached answer was produced from the data being corrected.
+            force_regenerate=True,
+            schedule_time=schedule,
+            price_percent=float(rep.get("price_percent") or config.START_PRICE_RATIO * 100),
+            photo_qc=bool(rep.get("photo_qc", True)),
+            on_progress=on_progress,
+            products=products,
+        )
+    except Exception as e:  # noqa: BLE001
+        st.error(f"The re-run went wrong: {e}")
+        with st.expander("Technical details"):
+            st.code(traceback.format_exc())
+        return
+
+    listed = [str(row.get("Custom label (SKU)")) for r in results for row in r.rows]
+    files = [r.output_path for r in results] + [linnworks_notes.path]
+    updated = last_batch.apply_fix(
+        rep, edits, listed, list(held_back.reasons), list(failed), list(uncovered),
+        Path(results[0].output_path).name if results else None, files,
+        datetime.now().isoformat())
+    try:
+        last_batch.save(updated)
+    except OSError as e:
+        st.warning(f"Couldn't save the fix for the Last Batch tab: {e}")
+    if (st.session_state.report
+            and st.session_state.report.get("ran_at_iso") == rep.get("ran_at_iso")):
+        st.session_state.report = updated
+
+    flash = f"Re-ran {len(edits)} SKU(s): {len(listed)} fixed"
+    still = len(edits) - len(listed)
+    if still:
+        flash += f", {still} still need attention (new reasons below)"
+    if schedule_dropped:
+        flash += ". The batch's schedule time had passed, so these start immediately"
+    st.session_state.quick_edit_flash = flash + "."
+    st.rerun()
+
+
+def _render_last_batch(api_key: str, workspace_id: str) -> None:
     """The Last Batch tab: the saved report, or this session's if newer.
     Anything that didn't reach a clean listing comes first, each SKU in its
     own red box rather than a line in a list. A clean-looking run has been
-    scrolled past with refusals in it before (07.09.26)."""
+    scrolled past with refusals in it before (07.09.26). Quick Edit sits
+    underneath, for correcting those SKUs and re-running just them."""
     rep = last_batch.newest(last_batch.load(), st.session_state.report)
     if not rep:
         st.info("No batch has been run yet")
@@ -355,11 +446,15 @@ def _render_last_batch() -> None:
     view = last_batch.batch_view(rep)
     counts = view["counts"]
 
+    flash = st.session_state.pop("quick_edit_flash", None)
+    if flash:
+        st.success(flash)
+
     st.markdown(f"**Ran at:** {view['ran_at']}  \n"
                 f"**Output:** {view['output_names'] or '(no file written)'}")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Processed", counts["processed"])
-    c2.metric("Listed", counts["listed"])
+    c2.metric("Listed", counts["listed"] + counts["fixed"])
     c3.metric("Held back", counts["held_back"])
     c4.metric("Failed", counts["failed"])
 
@@ -375,6 +470,52 @@ def _render_last_batch() -> None:
             st.warning(f"**{e['sku']}** · {label} — {e['reason']}", icon=icon)
     if not (view["needs_action"] or view["skipped"]):
         st.success("Nothing was held back, failed or skipped. Every product listed.")
+
+    snapshots = rep.get("products") or {}
+    editable = [e for e in view["needs_action"] if e["sku"] in snapshots]
+    if editable:
+        st.subheader("Quick edit")
+        st.caption(
+            "Correct a SKU's data below, then re-run it. Only edited SKUs are re-run, "
+            "through the same AI and every same check as a normal run, and anything that "
+            "now passes goes into a new FIXED upload file. Uses the API key from the Run tab."
+        )
+        # Keyed on when the report last changed, so the tables start fresh
+        # from the corrected data after every re-run.
+        stamp = rep.get("updated_at") or rep.get("ran_at_iso") or ""
+        edits = {}
+        for e in editable:
+            sku, snap = e["sku"], snapshots[e["sku"]]
+            _icon, label = _STATUS_LABELS[e["status"]]
+            with st.expander(f"Edit {sku} ({label.lower()})"):
+                st.caption(e["reason"])
+                st.markdown("**Orbitvu file** (size, condition notes, photos, measurements)")
+                meas_text = _field_editor(snap["measurements"], f"qe_meas_{sku}_{stamp}")
+                st.markdown("**Stock Data File** (RRP, brand, category, colour)")
+                master_text = _field_editor(snap["master"], f"qe_master_{sku}_{stamp}")
+            measurements, meas_changed = last_batch.apply_edits(snap["measurements"], meas_text)
+            master, master_changed = last_batch.apply_edits(snap["master"], master_text)
+            if meas_changed or master_changed:
+                edits[sku] = {"master": master, "measurements": measurements}
+        button_label = (f"Re-run {len(edits)} edited SKU(s)" if edits
+                        else "Edit a SKU above to re-run it")
+        if st.button(button_label, disabled=not edits, use_container_width=True,
+                     key="quick_edit_rerun"):
+            _rerun_edited(rep, edits, api_key, workspace_id)
+    elif view["needs_action"]:
+        st.caption("Quick Edit isn't available for this batch: it ran before Quick Edit "
+                   "existed, or its source data couldn't be saved.")
+
+    if view["fixed"]:
+        st.subheader(f"Fixed by Quick Edit ({len(view['fixed'])})")
+        for e in view["fixed"]:
+            st.success(f"**{e['sku']}** · {e['reason']}", icon="✅")
+        for path in rep.get("fixed_files") or []:
+            if Path(path).exists():
+                with open(path, "rb") as fh:
+                    st.download_button(f"Download {Path(path).name}", fh,
+                                       file_name=Path(path).name, mime="text/csv",
+                                       use_container_width=True, key=f"fixed_{path}")
 
     with st.expander(f"Listed ({len(view['listed'])})", expanded=False):
         if view["listed"]:
@@ -602,7 +743,22 @@ with run_tab:
                     "schedule_missed": schedule_missed,
                     "output_names": ", ".join(Path(r["output_path"]).name for r in persisted),
                     "report_name": f"{stem}_run report.txt",
+                    # A Quick Edit re-run prices and checks the same way.
+                    "price_percent": float(price_percent),
+                    "photo_qc": bool(photo_qc),
                 }
+                # The source rows of every SKU that failed or was held back,
+                # for Quick Edit in the Last Batch tab. The uploaded files
+                # are deleted when this block ends, so it's now or never.
+                problem_skus = ({str(sku) for sku, _ in held_back.reasons}
+                                | {str(f).partition(": ")[0] for f in failed})
+                if problem_skus:
+                    try:
+                        loaded, _ = data_loader.load_products(master_paths, measurements_paths)
+                        st.session_state.report["products"] = {
+                            p.sku: last_batch.snapshot(p) for p in loaded if p.sku in problem_skus}
+                    except Exception as e:  # noqa: BLE001 - never costs the run itself
+                        st.warning(f"Quick Edit won't be available for this batch: {e}")
                 # For the Last Batch tab. A failed save costs that tab its data,
                 # never the run itself, so it's reported and carried on from.
                 try:
@@ -653,4 +809,4 @@ with run_tab:
             _render_report(st.session_state.report)
 
 with last_batch_tab:
-    _render_last_batch()
+    _render_last_batch(api_key, workspace_id)
