@@ -1,4 +1,4 @@
-"""Streamlit UI for the Preamato Listing Helper.
+"""Streamlit UI for HORSEPOWER, the Preamato listing helper.
 
 Run with:
     streamlit run app.py
@@ -24,7 +24,7 @@ APP_DIR = Path(__file__).resolve().parent
 CACHE_DIR = APP_DIR / "cache"
 OUTPUT_DIR = APP_DIR / "output"
 
-st.set_page_config(page_title="Preamato Listing Helper", page_icon="⬛", layout="wide")
+st.set_page_config(page_title="HORSEPOWER", page_icon="⬛", layout="wide")
 
 BRAND_CSS = f"""
 <style>
@@ -48,16 +48,27 @@ html, body, [class*="css"], .stApp, button, input, textarea, select {{
     -webkit-font-smoothing: antialiased;
 }}
 
-.stApp {{ background: var(--canvas); }}
+/* Background image, faded behind a white veil so black text still reads
+   on it (Sammy, 23.10.26). Fixed, so it stays put while the page scrolls.
+   Plain white if the image file is missing. */
+.stApp {{
+    background:
+        linear-gradient(rgba(255, 255, 255, 0.965), rgba(255, 255, 255, 0.965)),
+        url("{branding.background_data_uri()}") center / cover no-repeat fixed,
+        var(--canvas);
+}}
+[data-testid="stHeader"] {{ background: transparent; }}
 
 /* Scale. Streamlit's defaults read small and thin against Helvetica Neue,
    so the root size goes up a step (every rem below follows it) and the
    page gets a readable measure rather than the narrow centred column or a
    full-width sprawl. Sammy, 23.10.26: "its all a bit small and thin". */
-html {{ font-size: 17px; }}
+html {{ font-size: 15px; }}
 .block-container {{
     max-width: 1100px !important;
-    padding-top: 2.25rem !important;
+    /* Clear of Streamlit's fixed toolbar, which otherwise sits over the
+       top of the banner on Community Cloud. */
+    padding-top: 4rem !important;
     padding-bottom: 4rem !important;
 }}
 .stApp p, .stApp li {{ line-height: 1.55; }}
@@ -68,21 +79,56 @@ html {{ font-size: 17px; }}
 }}
 
 /* Header ------------------------------------------------------------- */
-.preamato-logo {{
-    margin: 0.25rem 0 0.5rem 0;
+/* The wordmark as a banner, PREAMATO, a small star, PREAMATO ..., edge to
+   edge (Sammy, 23.10.26; it scrolled at first, now it stands still). Black
+   on white between two rules: a black bar would break the 95/5 rule. */
+.preamato-banner {{
+    /* Edge to edge of the window, out of the page column it sits in. */
+    width: 100vw;
+    margin-left: calc(50% - 50vw) !important;
+    overflow: hidden;
+    border-top: 2px solid var(--ink);
+    border-bottom: 2px solid var(--ink);
+    padding: 0.5rem 0;
+    margin: 0 0 0.9rem 0;
 }}
-.preamato-logo img {{
-    width: 260px;
-    height: auto;
+.preamato-banner-track {{
+    display: flex;
+    width: max-content;
+    /* Stationary, centred so both edges cut off evenly. */
+    margin-left: 50%;
+    transform: translateX(-50%);
+}}
+.preamato-banner-track > span {{
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+}}
+.preamato-banner img {{
+    height: 1.6rem;
+    width: auto;
     display: block;
 }}
-.preamato-subtitle {{
+.preamato-banner b {{
     font-size: 0.85rem;
-    font-weight: 700;
-    color: var(--muted);
+    font-weight: 400;
+    color: var(--ink);
+    margin: 0 1.6rem;
+    line-height: 1;
+}}
+/* 100vw counts the scrollbar too, so without this the banner would add a
+   sideways scroll of a few pixels on a Windows/scrollbar-always setup. */
+.stApp, [data-testid="stMain"], [data-testid="stAppViewContainer"] {{ overflow-x: hidden; }}
+/* The app's name, HORSEPOWER (Sammy, 23.10.26). Bold and black: it's the
+   title of the page, not a caption under the banner. */
+.preamato-subtitle {{
+    font-size: 2rem;
+    font-weight: 800;
+    color: var(--ink);
     text-transform: uppercase;
-    letter-spacing: 0.22em;
-    margin-bottom: 1.6rem;
+    letter-spacing: -0.01em;
+    line-height: 1.1;
+    margin-bottom: 0.9rem;
 }}
 
 /* Section headings. Uppercase and letter-spacing carry the cue, on a
@@ -94,9 +140,10 @@ h2, h3 {{
     font-size: 1.05rem !important;
     color: var(--ink) !important;
     border-bottom: 2px solid var(--ink);
-    padding-bottom: 0.6rem;
-    margin-top: 2.5rem !important;
-    margin-bottom: 0.9rem !important;
+    padding-top: 0 !important;
+    padding-bottom: 0.4rem !important;
+    margin-top: 1.1rem !important;
+    margin-bottom: 0.3rem !important;
 }}
 
 /* Tabs: the Run / Last Batch switch is the main navigation, so it reads
@@ -118,8 +165,8 @@ h2, h3 {{
     letter-spacing: 0.12em;
     font-weight: 700 !important;
     font-size: 0.9rem !important;
-    min-height: 3rem;
-    padding: 0.7rem 1.5rem !important;
+    min-height: 2.6rem;
+    padding: 0.5rem 1.4rem !important;
     border: 2px solid var(--ink) !important;
     background-color: var(--ink) !important;
     color: var(--canvas) !important;
@@ -143,7 +190,7 @@ h2, h3 {{
 }}
 /* The one button that starts a batch is the biggest thing on the page. */
 .stButton > button[kind="primary"] {{
-    min-height: 3.6rem;
+    min-height: 3.1rem;
     font-size: 1.05rem !important;
     letter-spacing: 0.16em;
 }}
@@ -154,7 +201,7 @@ h2, h3 {{
     border-radius: 0 !important;
     border: 1.5px solid var(--ink) !important;
     background-color: var(--canvas) !important;
-    min-height: 2.9rem;
+    min-height: 2.6rem;
 }}
 [data-baseweb="input"] input, [data-baseweb="select"] div {{ font-size: 1rem !important; }}
 [data-baseweb="input"] > div, [data-baseweb="input"] input,
@@ -236,8 +283,8 @@ button:hover svg, a:hover svg, summary:hover svg {{
 }}
 [data-testid="stExpander"] summary {{
     transition: color 90ms linear;
-    padding-top: 0.8rem !important;
-    padding-bottom: 0.8rem !important;
+    padding-top: 0.55rem !important;
+    padding-bottom: 0.55rem !important;
 }}
 [data-testid="stExpander"] summary p {{ font-weight: 700 !important; font-size: 1rem !important; }}
 [data-testid="stExpander"] summary:hover {{
@@ -275,11 +322,15 @@ a:hover {{ color: var(--matrix-ink) !important; }}
 
 st.markdown(BRAND_CSS, unsafe_allow_html=True)
 
+_BANNER_REPEATS = 16  # enough to fill the widest screen
+_banner_run = (f'<img src="{branding.logo_data_uri()}" alt=""><b>&#9733;</b>') * _BANNER_REPEATS
 st.markdown(
-    f'<div class="preamato-logo"><img src="{branding.logo_data_uri()}" alt="PREAMATO"></div>',
+    f'<div class="preamato-banner" role="img" aria-label="PREAMATO">'
+    f'<div class="preamato-banner-track"><span>{_banner_run}</span>'
+    f'</div></div>',
     unsafe_allow_html=True,
 )
-st.markdown('<div class="preamato-subtitle">Listing Helper</div>', unsafe_allow_html=True)
+st.markdown('<div class="preamato-subtitle">HORSEPOWER</div>', unsafe_allow_html=True)
 st.caption(
     "Combines your Stock Data File, the Orbitvu file, and eBay's category list into "
     "a ready-to-upload eBay listing spreadsheet — with AI-written titles, descriptions, and "
@@ -304,7 +355,7 @@ def _report_text(rep: dict) -> str:
     """The same report as plain text, so it can be copied out, pasted into
     a message, or kept as a file next to the upload it belongs to."""
     out = [
-        "Preamato Listing Helper — run report",
+        "HORSEPOWER — run report",
         f"Run at:     {rep['ran_at']}",
         f"Output:     {rep['output_names'] or '(no file written)'}",
         "",
@@ -619,28 +670,31 @@ run_tab, last_batch_tab = st.tabs(["Run", "Last Batch"])
 
 with run_tab:
     st.subheader("1. Your Anthropic API key")
-    api_key = st.text_input(
-        "API key",
-        type="password",
-        value=os.environ.get("ANTHROPIC_API_KEY", ""),
-        help="Get one at console.anthropic.com. Used only for this session — never saved to disk.",
-        label_visibility="collapsed",
-    )
-    with st.expander("Workspace ID (only needed for some keys)"):
-        st.caption(
-            "Most keys don't need this — leave it blank. It's only required if your API key is "
-            "\"identity-linked\" (a Personal or Service Account key) AND set to work across "
-            "multiple workspaces rather than restricted to just one. If you see an error mentioning "
-            "\"anthropic-workspace-id is required\", either paste that workspace's ID here (from "
-            "console.anthropic.com > Settings > Workspaces), or simpler: go create a new key there "
-            "restricted to a single workspace instead, which needs no ID at all."
-        )
-        workspace_id = st.text_input(
-            "Workspace ID",
-            value=os.environ.get("ANTHROPIC_WORKSPACE_ID", ""),
-            placeholder="wrkspc_...",
+    key_col, ws_col = st.columns([2, 1])
+    with key_col:
+        api_key = st.text_input(
+            "API key",
+            type="password",
+            value=os.environ.get("ANTHROPIC_API_KEY", ""),
+            help="Get one at console.anthropic.com. Used only for this session — never saved to disk.",
             label_visibility="collapsed",
         )
+    with ws_col:
+        with st.expander("Workspace ID (rarely needed)"):
+            st.caption(
+                "Most keys don't need this — leave it blank. It's only required if your API key is "
+                "\"identity-linked\" (a Personal or Service Account key) AND set to work across "
+                "multiple workspaces rather than restricted to just one. If you see an error mentioning "
+                "\"anthropic-workspace-id is required\", either paste that workspace's ID here (from "
+                "console.anthropic.com > Settings > Workspaces), or simpler: go create a new key there "
+                "restricted to a single workspace instead, which needs no ID at all."
+            )
+            workspace_id = st.text_input(
+                "Workspace ID",
+                value=os.environ.get("ANTHROPIC_WORKSPACE_ID", ""),
+                placeholder="wrkspc_...",
+                label_visibility="collapsed",
+            )
 
     st.subheader("2. Upload your files")
     col1, col2 = st.columns(2)
@@ -649,6 +703,13 @@ with run_tab:
             "Stock Data File (.xlsx)", type=["xlsx"], accept_multiple_files=True,
             help="Multiple files are merged — e.g. separate exports per supplier batch.",
         )
+    with col2:
+        measurements_files = st.file_uploader(
+            "Orbitvu file (.csv)", type=["csv"], accept_multiple_files=True,
+            help="Multiple files are merged — e.g. separate exports per photography batch.",
+        )
+    # Folded away: rarely used, and it took a third of this section's height.
+    with st.expander("Optional: override with your own eBay template (.xlsx)"):
         template_files = st.file_uploader(
             "eBay category listing template(s) (.xlsx) — optional override",
             type=["xlsx"],
@@ -667,11 +728,6 @@ with run_tab:
         )
         if not template_files:
             st.caption("No manual template uploaded — using the full department template set (menswear/womenswear clothing, shoes, accessories, jewellery & watches, homeware, kidswear).")
-    with col2:
-        measurements_files = st.file_uploader(
-            "Orbitvu file (.csv)", type=["csv"], accept_multiple_files=True,
-            help="Multiple files are merged — e.g. separate exports per photography batch.",
-        )
 
     st.subheader("3. Options")
     opt_col1, opt_col2, opt_col3 = st.columns(3)
@@ -682,56 +738,62 @@ with run_tab:
     with opt_col3:
         workers = st.slider("Speed (parallel AI calls)", min_value=1, max_value=10, value=4)
 
-    auction_enabled = st.checkbox(
-        "List as auction (instead of fixed price)",
-        value=False,
-        help=f"Every listing in this batch goes up as an auction starting at "
-             f"£{config.AUCTION_START_PRICE}, with no Buy It Now or Best Offer, on the "
-             f"\"{config.AUCTION_PAYMENT_PROFILE}\" payment policy. eBay only auctions one "
-             f"item, so a product with a quantity above 1 is held back.",
-    )
+    # Auction on the left; on the right, whichever price setting applies.
+    sell_col1, sell_col2 = st.columns([1, 2])
+    with sell_col1:
+        auction_enabled = st.checkbox(
+            "List as auction",
+            value=False,
+            help=f"Every listing in this batch goes up as an auction starting at "
+                 f"£{config.AUCTION_START_PRICE}, with no Buy It Now or Best Offer, on the "
+                 f"\"{config.AUCTION_PAYMENT_PROFILE}\" payment policy. eBay only auctions one "
+                 f"item, so a product with a quantity above 1 is held back.",
+        )
     auction_days = None
     price_percent = int(config.START_PRICE_RATIO * 100)
-    if auction_enabled:
-        auction_col, _ = st.columns([1, 2])
-        with auction_col:
+    with sell_col2:
+        if auction_enabled:
             auction_days = st.selectbox(
                 "Auction length (days)", options=list(config.AUCTION_DURATIONS),
                 index=list(config.AUCTION_DURATIONS).index(config.AUCTION_DEFAULT_DAYS),
             )
-        st.caption(f"Bidding starts at £{config.AUCTION_START_PRICE} on every listing, "
-                   f"payment policy \"{config.AUCTION_PAYMENT_PROFILE}\".")
-    else:
-        price_percent = st.slider(
-            "Selling price (% of RRP)",
-            min_value=5, max_value=100, value=int(config.START_PRICE_RATIO * 100), step=5,
-            help="Applied to every listing in the batch — start price is this % of the item's RRP, "
-                 "rounded to the nearest £5.",
+            st.caption(f"Bidding starts at £{config.AUCTION_START_PRICE} on every listing, "
+                       f"payment policy \"{config.AUCTION_PAYMENT_PROFILE}\".")
+        else:
+            price_percent = st.slider(
+                "Selling price (% of RRP)",
+                min_value=5, max_value=100, value=int(config.START_PRICE_RATIO * 100), step=5,
+                help="Applied to every listing in the batch — start price is this % of the item's RRP, "
+                     "rounded to the nearest £5.",
+            )
+
+    # One row, short labels; the full explanation is in each (?) tooltip.
+    flag_col1, flag_col2, flag_col3 = st.columns(3)
+    with flag_col1:
+        photo_qc = st.checkbox(
+            "Photo QC (slower)",
+            value=True,
+            help="After the listings are written, checks each one against its own main "
+                 "photo and holds back anything the picture clearly contradicts. Adds "
+                 "roughly ten to twenty minutes on a full batch. The free checks — an "
+                 "aspect that disagrees with the title or the composition — always run.",
         )
-
-    force_regenerate = st.checkbox(
-        "Regenerate everything (ignore cache)",
-        value=False,
-        help="By default, products already processed in a previous run are reused for free. Check this to force fresh AI output for every product.",
-    )
-
-    photo_qc = st.checkbox(
-        "QC every listing against its photograph (slower)",
-        value=True,
-        help="After the listings are written, checks each one against its own main "
-             "photo and holds back anything the picture clearly contradicts. Adds "
-             "roughly ten to twenty minutes on a full batch. The free checks — an "
-             "aspect that disagrees with the title or the composition — always run.",
-    )
+    with flag_col2:
+        force_regenerate = st.checkbox(
+            "Ignore cache",
+            value=False,
+            help="By default, products already processed in a previous run are reused for free. Check this to force fresh AI output for every product.",
+        )
+    with flag_col3:
+        schedule_enabled = st.checkbox(
+            "Schedule for later",
+            value=False,
+            help="Listings go live at a time you choose instead of immediately. GMT, on "
+                 "the hour, and eBay allows up to three weeks ahead.",
+        )
 
     schedule_time_str = None
     schedule_invalid = False
-    schedule_enabled = st.checkbox(
-        "Schedule listings for a future time (instead of starting immediately)",
-        value=False,
-        help="Listings go live at this time instead of immediately. GMT, on the "
-             "hour, and eBay allows up to three weeks ahead.",
-    )
     if schedule_enabled:
         default_dt = datetime.now() + timedelta(days=1)
         sched_col1, sched_col2 = st.columns(2)

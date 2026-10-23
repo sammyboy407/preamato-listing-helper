@@ -23,6 +23,9 @@ The one addition is MATRIX, the hover colour. Sammy asked for it on
 interaction state only, never a fill, which keeps the 95/5 rule intact.
 """
 
+import base64
+from pathlib import Path
+
 # Helvetica Neue is installed on every Mac in this business, so no webfont is
 # loaded and the brand's first choice renders natively. Aileron is named
 # after it for anyone who has it installed, then the usual grotesk fallbacks.
@@ -233,3 +236,21 @@ def logo_data_uri() -> str:
     cropped to the wordmark and reduced to a two-tone alpha image, which took
     it from 32KB to 13KB with no visible difference at header size."""
     return "data:image/png;base64," + LOGO_PNG_BASE64
+
+
+BACKGROUND_PATH = Path(__file__).resolve().parent / "background.svg"
+
+
+def background_data_uri() -> str:
+    """The page background (running horses, Sammy, 23.10.26), as a data URI,
+    or "" if the file is missing so the app still loads on plain white.
+
+    A vector trace of the original 1140px JPG, so it stays sharp at any
+    window size and on high-resolution screens instead of going soft when
+    stretched to fill the page. Read from a file next to this one rather
+    than inlined like the logo, since at ~110KB it would swamp this module."""
+    try:
+        data = BACKGROUND_PATH.read_bytes()
+    except OSError:
+        return ""
+    return "data:image/svg+xml;base64," + base64.b64encode(data).decode("ascii")
