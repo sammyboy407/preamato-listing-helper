@@ -26,6 +26,8 @@ BEST_OFFER_ENABLED = True
 # which eBay doesn't offer on auctions. It takes the auction payment policy,
 # which like the others must match Seller Hub exactly. eBay only auctions a
 # single item, so a row with Qty above 1 is held back rather than listed.
+# OriginalRetailPrice (the strikethrough RRP) is left empty on auctions,
+# which eBay refuses with it filled in.
 AUCTION_FORMAT = "Auction"
 AUCTION_DURATIONS = (1, 3, 5, 7, 10)  # days, the lengths eBay allows
 AUCTION_DEFAULT_DAYS = 7

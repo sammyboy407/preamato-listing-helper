@@ -256,7 +256,12 @@ def build_row(
         "Category name": category.category_name,
         "Title": ai_result.get("title"),
         "Start price": start_price,
-        "OriginalRetailPrice": rrp,
+        # eBay's strikethrough "was" price. Fixed price only: on an auction
+        # row eBay refuses the whole listing (21919008, "Discounted pricing
+        # is applicable for fixed price items only", all 26 rows of the
+        # first auction test, 23.10.26). The RRP still shows in the
+        # description and title.
+        "OriginalRetailPrice": None if auction_days else rrp,
         "Quantity": m.get("Qty") or config.QUANTITY_DEFAULT,
         "Item photo URL": "|".join(pic_urls),
         "Condition ID": ai_result.get("condition_id"),

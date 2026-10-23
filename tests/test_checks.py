@@ -2755,6 +2755,9 @@ def test_an_auction_batch_lists_as_auction_and_holds_back_multiples():
     check("fixed price keeps its own policy", fixed["Payment profile name"],
           "eBay Payments (Immediate Payment Required)")
     check("no Buy It Now price", "Buy It Now price" in auction, False)
+    # eBay refuses strikethrough pricing on an auction (21919008, 23.10.26).
+    check("no strikethrough RRP on an auction", auction["OriginalRetailPrice"], None)
+    check("fixed price keeps its strikethrough RRP", fixed["OriginalRetailPrice"], 700)
     product.master["Rounded RRP"] = None
     check("no RRP still opens at 1",
           build.build_row(product, ai, CATEGORY, make_template(), {}, None, 20.0,
