@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import re
 import time
+from typing import Optional
 
 import anthropic
 
@@ -34,14 +35,29 @@ _NON_RETRYABLE_EXCEPTIONS = (
 )
 
 
-def _contains_leaked_markup(value) -> bool:
+def _find_leaked_markup(value, path: str = "") -> Optional[str]:
+    """Where the first leaked fragment is and what it says, e.g.
+    'description: "...Lovely jacket.</p>"', or None when there isn't one.
+    The run report only shows this message, so it has to tell someone
+    which field to look at without them reading any code."""
     if isinstance(value, str):
-        return bool(_LEAKED_MARKUP_RE.search(value))
+        m = _LEAKED_MARKUP_RE.search(value)
+        if not m:
+            return None
+        start, end = max(0, m.start() - 40), min(len(value), m.end() + 40)
+        excerpt = ("..." if start else "") + value[start:end] + ("..." if end < len(value) else "")
+        return f'{path or "value"}: "{excerpt.strip()}"'
     if isinstance(value, dict):
-        return any(_contains_leaked_markup(v) for v in value.values())
+        for k, v in value.items():
+            found = _find_leaked_markup(v, f"{path}.{k}" if path else str(k))
+            if found:
+                return found
     if isinstance(value, list):
-        return any(_contains_leaked_markup(v) for v in value)
-    return False
+        for i, v in enumerate(value):
+            found = _find_leaked_markup(v, f"{path}[{i}]")
+            if found:
+                return found
+    return None
 
 
 def _friendly_config_error(e: Exception) -> str:
@@ -146,9 +162,10 @@ def call_structured(
             )
             for block in resp.content:
                 if block.type == "tool_use" and block.name == tool_name:
-                    if _contains_leaked_markup(block.input):
+                    leaked = _find_leaked_markup(block.input)
+                    if leaked:
                         raise RuntimeError(
-                            "Response contained leaked tool-call markup in a field value."
+                            f"Response contained leaked tool-call markup in {leaked}"
                         )
                     return block.input
             raise RuntimeError("Model did not return the expected tool call.")

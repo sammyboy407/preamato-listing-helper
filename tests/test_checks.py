@@ -2976,6 +2976,20 @@ def test_the_boilerplate_aspects_are_all_negatives():
     assert set(cg.BOILERPLATE_ASPECTS.values()) == {"No"}
 
 
+def test_a_markup_leak_names_the_field_and_the_text():
+    # The run report only shows this message, so it has to say where to look.
+    from src import ai_client
+    found = ai_client._find_leaked_markup({
+        "title": "Brioni Navy Wool Blazer",
+        "item_specifics": {"C:Colour": "Navy", "C:Style": "Blazer</description>"},
+    })
+    check("leak location", found, 'item_specifics.C:Style: "Blazer</description>"')
+    long_text = "A" * 60 + " lovely jacket.</p>"
+    found = ai_client._find_leaked_markup({"description": long_text})
+    check("long text is excerpted", found, 'description: "...' + long_text[-44:] + '"')
+    check("clean response", ai_client._find_leaked_markup({"title": "Navy <3 Blazer"}), None)
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
