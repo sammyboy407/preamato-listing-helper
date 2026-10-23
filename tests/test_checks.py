@@ -2734,6 +2734,44 @@ def test_a_scheduled_listing_actually_carries_its_start_time():
     check("no schedule, no column", "Schedule Time" in plain, False)
 
 
+def test_an_auction_batch_lists_as_auction_and_holds_back_multiples():
+    from src import build
+
+    product = make_product()
+    product.master["Qty"] = 1
+    product.master["Rounded RRP"] = 700
+    ai = {"title": "SIMONE ROCHA Tiered Mini Skirt White 8 RRP 700", "condition_id": 3000,
+          "condition_description": "Good.", "material_summary": "Cotton", "item_specifics": {}}
+
+    fixed = build.build_row(product, ai, CATEGORY, make_template(), {}, None, 50.0)
+    check("fixed price by default", (fixed["Format"], fixed["Duration"], fixed["Best Offer Enabled"]),
+          ("FixedPrice", "GTC", True))
+
+    auction = build.build_row(product, ai, CATEGORY, make_template(), {}, None, 20.0, auction_days=7)
+    check("auction row", (auction["Format"], auction["Duration"], auction["Best Offer Enabled"]),
+          ("Auction", "7", False))
+    check("bidding starts at 1 whatever the RRP", auction["Start price"], 1)
+    check("auction payment policy", auction["Payment profile name"], "Auction Policy")
+    check("fixed price keeps its own policy", fixed["Payment profile name"],
+          "eBay Payments (Immediate Payment Required)")
+    check("no Buy It Now price", "Buy It Now price" in auction, False)
+    product.master["Rounded RRP"] = None
+    check("no RRP still opens at 1",
+          build.build_row(product, ai, CATEGORY, make_template(), {}, None, 20.0,
+                          auction_days=7)["Start price"], 1)
+    product.master["Rounded RRP"] = 700
+    check("a single auction item lists",
+          [m for m in messages(run(auction)) if "auction" in m], [])
+
+    product.master["Qty"] = 3
+    multi = build.build_row(product, ai, CATEGORY, make_template(), {}, None, 20.0, auction_days=7)
+    blocked = [i for i in run(multi) if i.blocking and "auction" in i.message]
+    check("more than one item is held back", len(blocked), 1)
+    fixed_multi = build.build_row(product, ai, CATEGORY, make_template(), {}, None, 50.0)
+    check("fixed price with Qty 3 is fine",
+          [i for i in run(fixed_multi) if "auction" in i.message], [])
+
+
 def test_a_product_is_offered_its_own_department_first():
     """09.09.26. Of 128 garments, 108 listed and all EIGHTEEN womenswear Tops
     were lost — every single one in the file.

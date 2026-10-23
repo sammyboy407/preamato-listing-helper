@@ -3,7 +3,9 @@ primaryColor = "#000000"
 backgroundColor = "#FFFFFF"
 secondaryBackgroundColor = "#F2F2F2"
 textColor = "#111111"
-font = "sans serif"
+font = "'Helvetica Neue', Helvetica, Arial, sans-serif"
+headingFont = "'Helvetica Neue', Helvetica, Arial, sans-serif"
+baseRadius = "none"
 
 [server]
 headless = true

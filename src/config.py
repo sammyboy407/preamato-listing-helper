@@ -18,6 +18,20 @@ RETURN_PROFILE = "PAF Returns Policy - 30 Day Returns"
 PAYMENT_PROFILE = "eBay Payments (Immediate Payment Required)"
 BEST_OFFER_ENABLED = True
 
+# Auction is opt-in per batch (the app's "List as auction" option, or
+# --auction-days on the CLI); everything else lists FixedPrice/GTC as above.
+# An auction row starts bidding at AUCTION_START_PRICE whatever the RRP
+# (Sammy, 23.10.26: "we usually start them at 1"), runs for a number of days
+# instead of GTC, has no Buy It Now price, and goes up without Best Offer,
+# which eBay doesn't offer on auctions. It takes the auction payment policy,
+# which like the others must match Seller Hub exactly. eBay only auctions a
+# single item, so a row with Qty above 1 is held back rather than listed.
+AUCTION_FORMAT = "Auction"
+AUCTION_DURATIONS = (1, 3, 5, 7, 10)  # days, the lengths eBay allows
+AUCTION_DEFAULT_DAYS = 7
+AUCTION_START_PRICE = 1
+AUCTION_PAYMENT_PROFILE = "Auction Policy"
+
 # Schedule Time is opt-in, not a fixed default — leaving it blank means the
 # listing starts immediately (eBay's own guidance: it's used only to start a
 # listing at a specific future time, and can't be in the past). Set via

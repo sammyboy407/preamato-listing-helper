@@ -24,7 +24,7 @@ APP_DIR = Path(__file__).resolve().parent
 CACHE_DIR = APP_DIR / "cache"
 OUTPUT_DIR = APP_DIR / "output"
 
-st.set_page_config(page_title="Preamato Listing Helper", page_icon="⬛", layout="centered")
+st.set_page_config(page_title="Preamato Listing Helper", page_icon="⬛", layout="wide")
 
 BRAND_CSS = f"""
 <style>
@@ -50,18 +50,35 @@ html, body, [class*="css"], .stApp, button, input, textarea, select {{
 
 .stApp {{ background: var(--canvas); }}
 
+/* Scale. Streamlit's defaults read small and thin against Helvetica Neue,
+   so the root size goes up a step (every rem below follows it) and the
+   page gets a readable measure rather than the narrow centred column or a
+   full-width sprawl. Sammy, 23.10.26: "its all a bit small and thin". */
+html {{ font-size: 17px; }}
+.block-container {{
+    max-width: 1100px !important;
+    padding-top: 2.25rem !important;
+    padding-bottom: 4rem !important;
+}}
+.stApp p, .stApp li {{ line-height: 1.55; }}
+[data-testid="stCaptionContainer"], .stCaption, small {{
+    color: #4A4A4A !important;
+    font-size: 0.9rem !important;
+    opacity: 1 !important;
+}}
+
 /* Header ------------------------------------------------------------- */
 .preamato-logo {{
     margin: 0.25rem 0 0.5rem 0;
 }}
 .preamato-logo img {{
-    width: 208px;
+    width: 260px;
     height: auto;
     display: block;
 }}
 .preamato-subtitle {{
-    font-size: 0.72rem;
-    font-weight: 500;
+    font-size: 0.85rem;
+    font-weight: 700;
     color: var(--muted);
     text-transform: uppercase;
     letter-spacing: 0.22em;
@@ -73,13 +90,26 @@ html, body, [class*="css"], .stApp, button, input, textarea, select {{
 h2, h3 {{
     font-weight: 700 !important;
     text-transform: uppercase;
-    letter-spacing: 0.14em;
-    font-size: 0.78rem !important;
+    letter-spacing: 0.12em;
+    font-size: 1.05rem !important;
     color: var(--ink) !important;
-    border-bottom: 1px solid var(--ink);
-    padding-bottom: 0.55rem;
-    margin-top: 2.25rem !important;
+    border-bottom: 2px solid var(--ink);
+    padding-bottom: 0.6rem;
+    margin-top: 2.5rem !important;
+    margin-bottom: 0.9rem !important;
 }}
+
+/* Tabs: the Run / Last Batch switch is the main navigation, so it reads
+   like it, with a black underline on the active one. */
+[data-baseweb="tab-list"] {{ gap: 2rem; border-bottom: 1px solid var(--rule); }}
+[data-baseweb="tab"] p {{
+    font-size: 0.95rem !important;
+    font-weight: 700 !important;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+}}
+[data-baseweb="tab"]:hover p {{ color: var(--matrix-ink) !important; }}
+[data-baseweb="tab-highlight"] {{ background-color: var(--ink) !important; height: 3px !important; }}
 
 /* Anything clickable turns matrix green under the cursor ---------------- */
 .stButton > button, .stDownloadButton > button {{
@@ -87,8 +117,10 @@ h2, h3 {{
     text-transform: uppercase;
     letter-spacing: 0.12em;
     font-weight: 700 !important;
-    font-size: 0.78rem !important;
-    border: 1.5px solid var(--ink) !important;
+    font-size: 0.9rem !important;
+    min-height: 3rem;
+    padding: 0.7rem 1.5rem !important;
+    border: 2px solid var(--ink) !important;
     background-color: var(--ink) !important;
     color: var(--canvas) !important;
     transition: background-color 90ms linear, border-color 90ms linear, color 90ms linear;
@@ -105,12 +137,59 @@ h2, h3 {{
     color: var(--canvas) !important;
 }}
 
+.stButton > button p, .stDownloadButton > button p {{
+    font-size: inherit !important;
+    font-weight: inherit !important;
+}}
+/* The one button that starts a batch is the biggest thing on the page. */
+.stButton > button[kind="primary"] {{
+    min-height: 3.6rem;
+    font-size: 1.05rem !important;
+    letter-spacing: 0.16em;
+}}
+
+/* Text inputs, number inputs and dropdowns: a solid black edge, square,
+   and tall enough to hit easily. */
+[data-baseweb="input"], [data-baseweb="select"] > div, [data-baseweb="textarea"] {{
+    border-radius: 0 !important;
+    border: 1.5px solid var(--ink) !important;
+    background-color: var(--canvas) !important;
+    min-height: 2.9rem;
+}}
+[data-baseweb="input"] input, [data-baseweb="select"] div {{ font-size: 1rem !important; }}
+[data-baseweb="input"] > div, [data-baseweb="input"] input,
+[data-baseweb="base-input"] {{ background-color: var(--canvas) !important; }}
+[data-baseweb="input"]:focus-within, [data-baseweb="select"] > div:focus-within {{
+    border-color: var(--matrix-ink) !important;
+}}
+
+/* Run summaries and the Last Batch counts: the numbers are what someone
+   is looking for, so they are big and bold. */
+[data-testid="stMetricValue"] {{ font-size: 2.4rem !important; font-weight: 700 !important; }}
+[data-testid="stMetricLabel"] p {{
+    font-size: 0.8rem !important;
+    font-weight: 700 !important;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+}}
+
+/* Notices: square, like everything else, with readable type. */
+[data-testid="stAlert"], [data-testid="stAlertContainer"] {{ border-radius: 0 !important; }}
+[data-testid="stAlert"] p {{ font-size: 1rem !important; }}
+
 /* File uploaders */
 [data-testid="stFileUploaderDropzone"] {{
     border-radius: 0 !important;
     border: 1px dashed var(--ink) !important;
     background-color: var(--canvas) !important;
     transition: border-color 90ms linear;
+}}
+/* The dropzone's own small print stays at Streamlit's size, or the
+   bigger root size squeezes it onto three lines and cuts it off. */
+[data-testid="stFileUploaderDropzoneInstructions"] span,
+[data-testid="stFileUploaderDropzoneInstructions"] small {{
+    font-size: 0.8rem !important;
+    line-height: 1.35;
 }}
 [data-testid="stFileUploaderDropzone"]:hover {{
     border-color: var(--matrix-ink) !important;
@@ -157,7 +236,10 @@ button:hover svg, a:hover svg, summary:hover svg {{
 }}
 [data-testid="stExpander"] summary {{
     transition: color 90ms linear;
+    padding-top: 0.8rem !important;
+    padding-bottom: 0.8rem !important;
 }}
+[data-testid="stExpander"] summary p {{ font-weight: 700 !important; font-size: 1rem !important; }}
 [data-testid="stExpander"] summary:hover {{
     color: var(--matrix-ink) !important;
 }}
@@ -182,8 +264,10 @@ a:hover {{ color: var(--matrix-ink) !important; }}
 
 [data-testid="stCheckbox"] label p, .stSlider label p,
 .stNumberInput label p, .stTextInput label p,
-[data-testid="stFileUploader"] label p {{
-    font-weight: 500 !important;
+[data-testid="stFileUploader"] label p, .stSelectbox label p,
+.stDateInput label p, .stTimeInput label p {{
+    font-weight: 700 !important;
+    font-size: 1rem !important;
     letter-spacing: 0.01em;
 }}
 </style>
@@ -227,6 +311,9 @@ def _report_text(rep: dict) -> str:
         f"{rep['considered']} product(s) processed, "
         f"{rep['total_rows']} listing(s) written, {rep['not_listed']} not listed.",
     ]
+    if rep.get("auction_days"):
+        out += ["", f"Listed as {rep['auction_days']}-day auctions starting at "
+                    f"GBP {config.AUCTION_START_PRICE}, no Best Offer."]
     if rep["schedule_time"]:
         out += ["", f"Scheduled to go live at {rep['schedule_time']} GMT, not on upload."]
     if rep["unmatched"]:
@@ -319,6 +406,9 @@ def _render_report(rep: dict) -> None:
         )
     elif rep["schedule_time"]:
         st.info(f"Scheduled: these listings go live at {rep['schedule_time']} GMT, not on upload.")
+    if rep.get("auction_days"):
+        st.info(f"Auction: these listings run for {rep['auction_days']} days from "
+                f"£{config.AUCTION_START_PRICE}, with no Best Offer.")
 
     text = _report_text(rep)
     with st.expander("Run report — copy or save this before you download", expanded=False):
@@ -402,6 +492,7 @@ def _rerun_edited(rep: dict, edits: dict, api_key: str, workspace_id: str) -> No
             photo_qc=bool(rep.get("photo_qc", True)),
             on_progress=on_progress,
             products=products,
+            auction_days=rep.get("auction_days"),
         )
     except Exception as e:  # noqa: BLE001
         st.error(f"The re-run went wrong: {e}")
@@ -591,12 +682,32 @@ with run_tab:
     with opt_col3:
         workers = st.slider("Speed (parallel AI calls)", min_value=1, max_value=10, value=4)
 
-    price_percent = st.slider(
-        "Selling price (% of RRP)",
-        min_value=5, max_value=100, value=int(config.START_PRICE_RATIO * 100), step=5,
-        help="Applied to every listing in the batch — start price is this % of the item's RRP, "
-             "rounded to the nearest £5.",
+    auction_enabled = st.checkbox(
+        "List as auction (instead of fixed price)",
+        value=False,
+        help=f"Every listing in this batch goes up as an auction starting at "
+             f"£{config.AUCTION_START_PRICE}, with no Buy It Now or Best Offer, on the "
+             f"\"{config.AUCTION_PAYMENT_PROFILE}\" payment policy. eBay only auctions one "
+             f"item, so a product with a quantity above 1 is held back.",
     )
+    auction_days = None
+    price_percent = int(config.START_PRICE_RATIO * 100)
+    if auction_enabled:
+        auction_col, _ = st.columns([1, 2])
+        with auction_col:
+            auction_days = st.selectbox(
+                "Auction length (days)", options=list(config.AUCTION_DURATIONS),
+                index=list(config.AUCTION_DURATIONS).index(config.AUCTION_DEFAULT_DAYS),
+            )
+        st.caption(f"Bidding starts at £{config.AUCTION_START_PRICE} on every listing, "
+                   f"payment policy \"{config.AUCTION_PAYMENT_PROFILE}\".")
+    else:
+        price_percent = st.slider(
+            "Selling price (% of RRP)",
+            min_value=5, max_value=100, value=int(config.START_PRICE_RATIO * 100), step=5,
+            help="Applied to every listing in the batch — start price is this % of the item's RRP, "
+                 "rounded to the nearest £5.",
+        )
 
     force_regenerate = st.checkbox(
         "Regenerate everything (ignore cache)",
@@ -704,6 +815,7 @@ with run_tab:
                     price_percent=float(price_percent),
                     photo_qc=bool(photo_qc),
                     on_progress=on_progress,
+                    auction_days=auction_days,
                 )
                 persisted = []
                 for r in results:
@@ -746,6 +858,7 @@ with run_tab:
                     # A Quick Edit re-run prices and checks the same way.
                     "price_percent": float(price_percent),
                     "photo_qc": bool(photo_qc),
+                    "auction_days": auction_days,
                 }
                 # The source rows of every SKU that failed or was held back,
                 # for Quick Edit in the Last Batch tab. The uploaded files

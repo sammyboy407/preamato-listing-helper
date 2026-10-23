@@ -71,6 +71,12 @@ def main() -> None:
         help=f"Selling price as a %% of RRP, applied to every listing and rounded to the nearest "
              f"5 (default {config.START_PRICE_RATIO * 100:.0f}).",
     )
+    parser.add_argument(
+        "--auction-days", type=int, default=None, choices=config.AUCTION_DURATIONS,
+        help=f"List every product as an auction running this many days, starting at "
+             f"{config.AUCTION_START_PRICE} with no Best Offer, on the auction payment policy "
+             f"(--price-percent is ignored). Omit for fixed price.",
+    )
     parser.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR))
     parser.add_argument("--limit", type=int, default=None, help="Only process the first N matched products (for testing)")
     parser.add_argument("--workers", type=int, default=4, help="Concurrent AI calls for per-product content")
@@ -105,6 +111,7 @@ def main() -> None:
         schedule_time=args.schedule_time,
         price_percent=args.price_percent,
         on_progress=on_progress,
+        auction_days=args.auction_days,
     )
 
     total_rows = sum(len(r.rows) for r in results)

@@ -116,6 +116,7 @@ def check_row(
     _check_title(sku, row, product, size_for_display, issues)
     _check_photos(sku, row, issues)
     _check_price(sku, row, issues)
+    _check_auction_quantity(sku, row, issues)
     _check_measurements(sku, product, issues)
     _check_assumed_size(sku, product, row, issues)
     _check_range_size(sku, product, row, issues)
@@ -243,6 +244,21 @@ def _explain_bad_measurement(column, value, low, high):
                 f"most likely a slipped decimal for {shifted:g}. Check the scan sheet")
     return (f"{column} is {value:g}, outside the plausible {low}-{high} inches — "
             f"check for a typo or a cm value")
+
+
+def _check_auction_quantity(sku, row, issues):
+    """eBay only auctions one item at a time and refuses a row with more."""
+    if _text(row.get("Format")) != config.AUCTION_FORMAT:
+        return
+    try:
+        qty = float(_text(row.get("Quantity")) or 1)
+    except ValueError:
+        return
+    if qty > 1:
+        issues.append(Issue(
+            sku, "REVIEW",
+            f"quantity is {row.get('Quantity')} but an auction can only sell 1. List it "
+            f"as fixed price instead, or set Qty to 1", blocking=True))
 
 
 def _check_measurements(sku, product, issues):

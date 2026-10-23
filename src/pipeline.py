@@ -242,6 +242,7 @@ def run(
     photo_qc: bool = False,
     on_progress: ProgressFn = _noop,
     products: list | None = None,
+    auction_days: int | None = None,
 ) -> tuple[list[TemplateResult], int, list[str], list[str], list[str], "HeldBack"]:
     """Runs the full pipeline. Returns (template_results, num_products_considered,
     uncovered_skus, unmatched_skus, failed, held_back) — uncovered_skus lists
@@ -506,7 +507,8 @@ def run(
             continue
         template = templates[idx]
         category = template.category_by_id(entry["category_id"])
-        row = build.build_row(p, ai_results[p.sku], category, template, blurb_cache, schedule_time, price_percent)
+        row = build.build_row(p, ai_results[p.sku], category, template, blurb_cache, schedule_time, price_percent,
+                              auction_days=auction_days)
 
         # Deterministic checks, run per row before anything is written (see
         # validation.py). Free — no AI call, no measurable time — and they

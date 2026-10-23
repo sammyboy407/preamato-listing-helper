@@ -221,6 +221,7 @@ def build_row(
     blurb_cache: dict[str, str],
     schedule_time: str | None = None,
     price_percent: float = config.START_PRICE_RATIO * 100,
+    auction_days: int | None = None,
 ) -> dict:
     m, meas = product.master, product.measurements
 
@@ -233,6 +234,9 @@ def build_row(
     # is not recorded rather than claiming this number is one.
     if not start_price and config.FALLBACK_START_PRICE:
         start_price = config.FALLBACK_START_PRICE
+    # An auction always opens at the same low bid; the RRP plays no part.
+    if auction_days:
+        start_price = config.AUCTION_START_PRICE
 
     pic_urls = split_image_urls(meas.get("Images 2D link"))
 
@@ -259,15 +263,15 @@ def build_row(
         "ConditionDescription": condition_note,
         "Description": build_description(product, ai_result, category, template, blurb_cache,
                                          condition_note=condition_note),
-        "Format": config.FORMAT,
-        "Duration": config.DURATION,
-        "Best Offer Enabled": config.BEST_OFFER_ENABLED,
+        "Format": config.AUCTION_FORMAT if auction_days else config.FORMAT,
+        "Duration": str(auction_days) if auction_days else config.DURATION,
+        "Best Offer Enabled": False if auction_days else config.BEST_OFFER_ENABLED,
         "VAT%": config.VAT_PERCENT,
         "Immediate pay required": True,
         "Location": config.LOCATION,
         "Shipping profile name": config.SHIPPING_PROFILE,
         "Return profile name": config.RETURN_PROFILE,
-        "Payment profile name": config.PAYMENT_PROFILE,
+        "Payment profile name": config.AUCTION_PAYMENT_PROFILE if auction_days else config.PAYMENT_PROFILE,
     }
 
     for field_name, value in ai_result.get("item_specifics", {}).items():
